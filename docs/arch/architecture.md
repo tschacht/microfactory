@@ -7,7 +7,7 @@ Microfactory is a command-line tool written in Rust that abstracts the principle
 Key features:
 - **Generic Abstraction**: Supports any domain (e.g., code fixing, data processing) via configurable presets.
 - **MAKER Fidelity**: Maximal Agentic Decomposition (MAD), microagent sampling, "first-to-ahead-by-k" voting, and red-flagging.
-- **Integration**: Uses the `llm` command-line tool as the LLM backend; underlying models and API keys are configured via `llm` plugins and key management.
+- **Integration**: Uses the `rig` Rust library as the LLM backend; underlying models and API keys are configured via provider-specific environment variables and configuration.
 - **Performance**: Asynchronous, concurrent execution with state persistence for large-scale tasks.
 
 This document outlines the architecture, components, and implementation details.
@@ -29,7 +29,7 @@ Microfactory aims to follow the MAKER massively decomposed agentic process (MDAP
 - **Adaptive error correction**: Support both fixed and adaptive `k` in first-to-ahead-by-k voting, informed by per-step verification statistics.
 - **Pluggable red-flagging**: Red-flag checks (length, syntax, LLM-based critique, etc.) are modeled as a configurable pipeline per domain.
 - **Metrics and observability**: The context records per-step metrics (samples, resamples, votes, verification outcomes) to enable analysis and tuning.
-- **Resource and rate control**: Concurrency limits are applied to `llm` invocations to avoid overload and API rate-limit issues.
+- **Resource and rate control**: Concurrency limits are applied to LLM API calls to avoid overload and rate-limit issues.
 - **Human-in-loop hooks**: The runner can pause and ask for human input when repeated failures, high disagreement, or red flags occur.
 
 ## CLI Interface
@@ -38,16 +38,16 @@ Using the `clap` crate for parsing.
 
 Example usage:
 ```
-microfactory run --prompt "fix tests in the repo" --llm-model gpt-5.1-codex-mini --samples 10 --k 3 --domain code --repo-path ./ --dry-run
+microfactory run --prompt "fix tests in the repo" --api-key $OPENAI_API_KEY --llm-model gpt-5.1-codex-mini --samples 10 --k 3 --domain code --repo-path ./ --dry-run
 ```
 
 - `--prompt`: Global task description (required).
-- `--llm-model`: Model alias to pass to `llm -m` (default: gpt-5.1-codex-mini).
-- `--llm-bin`: Path to the `llm` executable (default: `llm`).
+- `--api-key`: API key for the configured LLM provider (optional if configured via environment variables).
+- `--llm-model`: Model identifier to pass to the `rig` provider (default: gpt-5.1-codex-mini).
 - `--samples`: Number of microagents per step (default: 10).
 - `--k`: Voting margin (default: 3).
 - `--adaptive-k`: Enable adaptive adjustment of `k` based on observed verification statistics (optional).
-- `--max-concurrent-llm`: Maximum number of concurrent `llm` processes (default: derived from CPU cores).
+- `--max-concurrent-llm`: Maximum number of concurrent LLM API calls (default: derived from CPU cores).
 - `--domain`: Preset domain (e.g., "code").
 - `--repo-path`: Domain-specific path (e.g., repo root).
 - `--dry-run`: Simulate without applying changes.
@@ -59,25 +59,22 @@ Subcommands:
 ## Core Components
 
 ### 1. LLM Integration
-- Primary integration is via the `llm` CLI, invoked from Rust using `tokio::process::Command`.
-- Microfactory calls `llm prompt` with `--no-stream` to obtain a single response per microagent; models and providers are selected via `-m/--model` and standard `llm` configuration.
+- Primary integration is via the `rig` crate, which provides typed clients for LLM providers (e.g., OpenAI-compatible APIs).
+- Microfactory uses `rig` to obtain a single response per microagent; models and providers are selected via the configured provider and the `--llm-model` CLI flag or per-agent `model` settings.
 - Prompt templating: Use `handlebars` for dynamic prompts (e.g., insert state/context).
-- Wrap calls behind an `LlmClient` trait so that the rest of the system is independent of the concrete backend.
-- Use a concurrency limiter (e.g., semaphore) around `llm` invocations, configured via `--max-concurrent-llm` and/or domain configuration.
+- Wrap calls behind an `LlmClient` trait so that the rest of the system is independent of the concrete backend and provider.
+- Use a concurrency limiter (e.g., semaphore) around LLM calls, configured via `--max-concurrent-llm` and/or domain configuration.
 
-Example microagent creation (CLI):
+Example microagent creation (rig-based):
 ```rust
-use tokio::process::Command;
+use rig::providers::openai::Client;
+use rig::agent::AgentBuilder;
 
-async fn create_microagent(prompt: &str, model: &str, llm_bin: &str) -> anyhow::Result<String> {
-    let output = Command::new(llm_bin)
-        .arg("prompt")
-        .arg("-m").arg(model)
-        .arg("--no-stream")
-        .arg(prompt)
-        .output()
-        .await?;
-    Ok(String::from_utf8(output.stdout)?)
+async fn create_microagent(prompt: &str, model: &str, api_key: &str) -> anyhow::Result<String> {
+    let provider = Client::new(api_key);
+    let agent = AgentBuilder::new(provider.model(model)).build();
+    let response = agent.chat(prompt).await?;
+    Ok(response.content)
 }
 ```
 
@@ -231,6 +228,7 @@ strsim = "0.10"   # Fuzzy matching
 rusqlite = "0.29" # Optional persistence
 handlebars = "4.3" # Templating
 tracing = "0.1"
+rig = "0.1"       # LLM client
 ```
 
 ## Alternative: As an Agent Tool
@@ -251,11 +249,11 @@ This section describes a suggested implementation sequence assuming the work is 
 
 ### Phase 1: LLM Client and Sampling
 
-- Implement a concrete `LlmClient` that shells out to the `llm` executable, using `tokio::process::Command` and `llm prompt --no-stream`.
-- Implement concurrency limiting for `llm` calls using a semaphore; make the limit configurable via `--max-concurrent-llm`.
-- Expose a simple internal API `sample_n` that requests `n` responses from the configured `llm` model for a given prompt.
-- Extend the `run` subcommand so that, in a "debug" or "dry-run only" mode, it can issue a single `llm` call on the global prompt and print the response, without yet running the full workflow graph.
-- Add tests or lightweight checks around error handling for `llm` invocation (missing binary, non-zero exit code, invalid UTF-8).
+- Implement a concrete `LlmClient` using the `rig` crate, targeting an OpenAI-compatible provider and using the `--api-key` and `--llm-model` options.
+- Implement concurrency limiting for LLM calls using a semaphore; make the limit configurable via `--max-concurrent-llm`.
+- Expose a simple internal API `sample_n` that requests `n` responses from the configured model for a given prompt.
+- Extend the `run` subcommand so that, in a "debug" or "dry-run only" mode, it can issue a single LLM call via `LlmClient` on the global prompt and print the response, without yet running the full workflow graph.
+- Add tests or lightweight checks around error handling for LLM invocation (invalid API key, network errors, provider errors).
 
 ### Phase 2: Context and Linear Workflow
 

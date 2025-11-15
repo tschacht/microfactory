@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// Microfactory CLI definition following the architecture spec.
 #[derive(Debug, Parser)]
@@ -46,6 +46,14 @@ pub struct RunArgs {
     )]
     pub llm_model: String,
 
+    #[arg(
+        long,
+        default_value_t = LlmProvider::Openai,
+        value_enum,
+        help = "LLM provider backend (openai, anthropic, gemini, grok)"
+    )]
+    pub llm_provider: LlmProvider,
+
     #[arg(long, default_value_t = 10, help = "Samples per microagent step")]
     pub samples: usize,
 
@@ -77,6 +85,36 @@ pub struct ResumeArgs {
     pub session_id: String,
 }
 
+/// Supported LLM providers surfaced via the CLI.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+#[clap(rename_all = "lower")]
+pub enum LlmProvider {
+    Openai,
+    Anthropic,
+    Gemini,
+    Grok,
+}
+
+impl LlmProvider {
+    pub fn provider_id(self) -> &'static str {
+        match self {
+            LlmProvider::Openai => rig::client::builder::DefaultProviders::OPENAI,
+            LlmProvider::Anthropic => rig::client::builder::DefaultProviders::ANTHROPIC,
+            LlmProvider::Gemini => rig::client::builder::DefaultProviders::GEMINI,
+            LlmProvider::Grok => rig::client::builder::DefaultProviders::XAI,
+        }
+    }
+
+    pub fn env_var(self) -> &'static str {
+        match self {
+            LlmProvider::Openai => "OPENAI_API_KEY",
+            LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
+            LlmProvider::Gemini => "GEMINI_API_KEY",
+            LlmProvider::Grok => "XAI_API_KEY",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +132,8 @@ mod tests {
             "--repo-path",
             "./repo",
             "--dry-run",
+            "--llm-provider",
+            "openai",
         ]);
 
         match cli.command {

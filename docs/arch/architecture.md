@@ -42,7 +42,8 @@ microfactory run --prompt "fix tests in the repo" --api-key $OPENAI_API_KEY --ll
 ```
 
 - `--prompt`: Global task description (required).
-- `--api-key`: API key for the configured LLM provider (optional if configured via environment variables).
+- `--api-key`: API key for the configured LLM provider (optional if configured via environment variables). By default, Microfactory attempts to load provider-specific variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`) from `~/.env` before falling back to the current process environment.
+- `--llm-provider`: Selects the backend provider (`openai`, `anthropic`, `gemini`, or `grok`, which maps to xAI's Grok models). Defaults to `openai`.
 - `--llm-model`: Model identifier to pass to the `rig` provider (default: gpt-5.1-codex-mini).
 - `--samples`: Number of microagents per step (default: 10).
 - `--k`: Voting margin (default: 3).
@@ -60,7 +61,9 @@ Subcommands:
 
 ### 1. LLM Integration
 - Primary integration is via the `rig` crate, which provides typed clients for LLM providers (e.g., OpenAI-compatible APIs).
-- Microfactory uses `rig` to obtain a single response per microagent; models and providers are selected via the configured provider and the `--llm-model` CLI flag or per-agent `model` settings.
+- Microfactory uses `rig` to obtain a single response per microagent; models and providers are selected via the `--llm-provider`/`--llm-model` CLI flags or per-agent `model` settings.
+- Provider-neutral backend: the CLI currently supports OpenAI, Anthropic (Claude), Google Gemini, and xAI Grok via rig's dynamic client builder, so the orchestration stack behaves identically regardless of which foundation model is chosen.
+- API keys are resolved lazily per provider by reading `~/.env` (if present) before falling back to the active process environment; vars are scoped (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`) and never overwrite already-set values.
 - Prompt templating: Use `handlebars` for dynamic prompts (e.g., insert state/context).
 - Wrap calls behind an `LlmClient` trait so that the rest of the system is independent of the concrete backend and provider.
 - Use a concurrency limiter (e.g., semaphore) around LLM calls, configured via `--max-concurrent-llm` and/or domain configuration.
@@ -256,6 +259,8 @@ This section describes a suggested implementation sequence assuming the work is 
 - Expose a simple internal API `sample_n` that requests `n` responses from the configured model for a given prompt.
 - Extend the `run` subcommand so that, in a "debug" or "dry-run only" mode, it can issue a single LLM call via `LlmClient` on the global prompt and print the response, without yet running the full workflow graph.
 - Add tests or lightweight checks around error handling for LLM invocation (invalid API key, network errors, provider errors).
+
+**Implementation Status (Nov 15, 2025):** Completed. `RigLlmClient` now wraps `rig-core`'s dynamic client builder so the CLI can target OpenAI, Anthropic, Gemini, or xAI's Grok models with a shared semaphore-based concurrency cap (`--max-concurrent-llm`). API keys come from `--api-key` or provider-specific environment variables that are first hydrated from `~/.env`, and `--llm-provider` selects which backend + env var pairing to use. The `run` command instantiates the provider-specific client (also stored inside `FlowRunner`) and, when invoked with `--dry-run`, performs a single model probe on the global prompt and streams the response without entering the workflow. New tests cover API-key resolution precedence, dry-run error surfacing, `.env` parsing, and validation of blank credentials so LLM failures are caught early; `cargo test` remains green.
 
 ### Phase 2: Context and Linear Workflow
 

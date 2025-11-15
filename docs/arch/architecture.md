@@ -247,6 +247,8 @@ This section describes a suggested implementation sequence assuming the work is 
 - Define the `Context` type, `AgentKind`, `AgentConfig`, `LlmClient` trait, and `FlowRunner` skeleton (interfaces only, no real graph logic yet).
 - Add basic tests for CLI parsing and configuration loading; ensure the crate builds and these tests pass.
 
+**Implementation Status (Nov 15, 2025):** Completed. The repository now contains a Rust binary crate with the specified dependencies plus `async-trait`/`serde_yaml` to support the planned abstractions. The CLI exposes `run`, `status`, and `resume` subcommands with all documented flags, and unit tests confirm CLI parsing behavior. `config.rs` loads `config.yaml` into typed structs for domains, agents, step granularity, and red-flaggers, with helpful error context. Core runtime scaffolding is in place: `Context`, `AgentKind`, and `AgentConfig` structures capture runtime state, `LlmClient` defines the async sampling interface, and `FlowRunner` validates domains and logs placeholder execution. `cargo test` passes, covering the CLI and configuration loader.
+
 ### Phase 1: LLM Client and Sampling
 
 - Implement a concrete `LlmClient` using the `rig` crate, targeting an OpenAI-compatible provider and using the `--api-key` and `--llm-model` options.

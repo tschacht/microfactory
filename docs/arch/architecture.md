@@ -7,7 +7,7 @@ Microfactory is a command-line tool written in Rust that abstracts the principle
 Key features:
 - **Generic Abstraction**: Supports any domain (e.g., code fixing, data processing) via configurable presets.
 - **MAKER Fidelity**: Maximal Agentic Decomposition (MAD), microagent sampling, "first-to-ahead-by-k" voting, and red-flagging.
-- **Integration**: Uses OpenAI API (via Rust crates) for LLM calls; optional fallback to Codex CLI.
+- **Integration**: Uses the `llm` command-line tool as the LLM backend; underlying models and API keys are configured via `llm` plugins and key management.
 - **Performance**: Asynchronous, concurrent execution with state persistence for large-scale tasks.
 
 This document outlines the architecture, components, and implementation details.
@@ -20,20 +20,34 @@ This document outlines the architecture, components, and implementation details.
 - **Safety**: Human-in-loop options, retries, and dry-run mode.
 - **Rust Advantages**: Type safety, concurrency (Tokio), error handling (anyhow).
 
+## MAKER Alignment and Extensions
+
+Microfactory aims to follow the MAKER massively decomposed agentic process (MDAP) framework while remaining generic:
+
+- **Explicit agent roles**: Separate agents for decomposition, decomposition discrimination, solution discrimination, and minimal problem solving, each with their own prompts and models.
+- **Step granularity control**: Domains define how aggressively tasks are decomposed into minimal subtasks, so MAD-style behavior can be tuned per workflow.
+- **Adaptive error correction**: Support both fixed and adaptive `k` in first-to-ahead-by-k voting, informed by per-step verification statistics.
+- **Pluggable red-flagging**: Red-flag checks (length, syntax, LLM-based critique, etc.) are modeled as a configurable pipeline per domain.
+- **Metrics and observability**: The context records per-step metrics (samples, resamples, votes, verification outcomes) to enable analysis and tuning.
+- **Resource and rate control**: Concurrency limits are applied to `llm` invocations to avoid overload and API rate-limit issues.
+- **Human-in-loop hooks**: The runner can pause and ask for human input when repeated failures, high disagreement, or red flags occur.
+
 ## CLI Interface
 
 Using the `clap` crate for parsing.
 
 Example usage:
 ```
-microfactory run --prompt "fix tests in the repo" --api-key $OPENAI_API_KEY --model gpt-4o-mini --samples 10 --k 3 --domain code --repo-path ./ --dry-run
+microfactory run --prompt "fix tests in the repo" --llm-model gpt-5.1-codex-mini --samples 10 --k 3 --domain code --repo-path ./ --dry-run
 ```
 
 - `--prompt`: Global task description (required).
-- `--api-key`: OpenAI API key (required).
-- `--model`: LLM model (default: gpt-4o-mini).
+- `--llm-model`: Model alias to pass to `llm -m` (default: gpt-5.1-codex-mini).
+- `--llm-bin`: Path to the `llm` executable (default: `llm`).
 - `--samples`: Number of microagents per step (default: 10).
 - `--k`: Voting margin (default: 3).
+- `--adaptive-k`: Enable adaptive adjustment of `k` based on observed verification statistics (optional).
+- `--max-concurrent-llm`: Maximum number of concurrent `llm` processes (default: derived from CPU cores).
 - `--domain`: Preset domain (e.g., "code").
 - `--repo-path`: Domain-specific path (e.g., repo root).
 - `--dry-run`: Simulate without applying changes.
@@ -45,32 +59,24 @@ Subcommands:
 ## Core Components
 
 ### 1. LLM Integration
-- Primary: `rig` crate for direct OpenAI API calls (faster, structured outputs).
-- Fallback: Spawn `codex` CLI processes via `tokio::process::Command` if needed.
+- Primary integration is via the `llm` CLI, invoked from Rust using `tokio::process::Command`.
+- Microfactory calls `llm prompt` with `--no-stream` to obtain a single response per microagent; models and providers are selected via `-m/--model` and standard `llm` configuration.
 - Prompt templating: Use `handlebars` for dynamic prompts (e.g., insert state/context).
+- Wrap calls behind an `LlmClient` trait so that the rest of the system is independent of the concrete backend.
+- Use a concurrency limiter (e.g., semaphore) around `llm` invocations, configured via `--max-concurrent-llm` and/or domain configuration.
 
-Example microagent creation (API):
-```rust
-use rig::completion::PromptCompletion;
-use rig::providers::openai::Client;
-
-async fn create_microagent(prompt: &str, model: &str, api_key: &str) -> anyhow::Result<String> {
-    let provider = Client::new(api_key);
-    let agent = rig::agent::AgentBuilder::new(provider.model(model)).build();
-    let response = agent.chat(prompt).await?;
-    Ok(response.content)
-}
-```
-
-CLI fallback:
+Example microagent creation (CLI):
 ```rust
 use tokio::process::Command;
 
-async fn call_codex_cli(prompt: &str) -> anyhow::Result<String> {
-    let output = Command::new("codex")
-        .arg("--model").arg("gpt-4o-mini")
-        .arg("--prompt").arg(prompt)
-        .output().await?;
+async fn create_microagent(prompt: &str, model: &str, llm_bin: &str) -> anyhow::Result<String> {
+    let output = Command::new(llm_bin)
+        .arg("prompt")
+        .arg("-m").arg(model)
+        .arg("--no-stream")
+        .arg(prompt)
+        .output()
+        .await?;
     Ok(String::from_utf8(output.stdout)?)
 }
 ```
@@ -78,12 +84,15 @@ async fn call_codex_cli(prompt: &str) -> anyhow::Result<String> {
 ### 2. State Management
 - `Context` struct: Thread-safe (`Arc<RwLock<Context>>`).
   - Fields: Global prompt, decomposed steps (Vec<Step>), current index, domain data (e.g., HashMap<PathBuf, String> for files), LLM history.
+  - Metrics: Per-step statistics such as sample counts, vote counts, red-flag hits, verification outcomes, and timings, used for analysis and adaptive algorithms (e.g., adaptive `k`).
 - Persistence: Serialize to JSON or SQLite (`serde`, `rusqlite`) with session UUIDs.
 
 ### 3. Workflow Graph
 - Use `petgraph` or build on `graph-flow` crate for orchestration.
 - Nodes: Tasks implementing a `MicroTask` trait.
 - Edges: Sequential or conditional (e.g., loop on verify fail).
+
+MicroTasks can be parameterized to implement MAKER's four agent roles: decomposition agents, decomposition discriminator agents, solution discriminator agents, and solver agents for minimal subtasks. The workflow graph wires these tasks into a decomposition-plus-solve pipeline with localized verification and error correction.
 
 `MicroTask` trait:
 ```rust
@@ -105,10 +114,11 @@ enum NextAction {
 }
 ```
 
-Key tasks:
-- **DecompositionTask**: LLM prompt to generate atomic steps (output: JSON Vec<String>).
-- **SamplingTask**: Run `samples` concurrent microagents; collect outputs.
-- **VotingTask**: Fuzzy grouping (`strsim` crate), "first-to-ahead-by-k" logic; resample if needed.
+Key tasks (MAKER-style roles):
+- **DecompositionTask**: Decomposition agents that break a task into subtasks and composition metadata.
+- **DecompositionVoteTask**: Decomposition discriminator agents that vote among alternative decompositions using first-to-ahead-by-k.
+- **SolveTask**: Problem-solver agents that attempt minimal subtasks without further decomposition.
+- **SolutionVoteTask**: Solution discriminator agents that vote among candidate minimal-step solutions.
 - **RedFlagTask**: Rule-based or LLM check for risky outputs.
 - **ApplyVerifyTask**: Domain-specific (e.g., patch files, run `pytest`).
 
@@ -121,16 +131,70 @@ Orchestrator (`FlowRunner`):
 ```yaml
 domains:
   code:
+    agents:
+      decomposition:
+        prompt_template: "code_decompose.hbs"
+        model: "gpt-5.1-codex"
+        samples: 3
+      decomposition_discriminator:
+        prompt_template: "code_decompose_vote.hbs"
+        model: "gpt-5.1-codex-mini"
+        k: 3
+      solver:
+        prompt_template: "code_solve_step.hbs"
+        model: "gpt-5.1-codex"
+        samples: 10
+      solution_discriminator:
+        prompt_template: "code_solution_vote.hbs"
+        model: "gpt-5.1-codex-mini"
+        k: 3
+    step_granularity:
+      max_files: 1
+      max_lines_changed: 20
     verifier: "pytest -v"
     applier: "patch_file"  # Built-in function
+    red_flaggers:
+      - type: "length"
+        max_tokens: 2048
+      - type: "syntax"
+        language: "python"
 ```
-- Traits for custom domains (e.g., `Verifier` impl).
+- Traits for custom domains (e.g., `Verifier`, `Applier`, `RedFlagger`) and utilities for mapping agent configs to `MicroTask` implementations.
+
+### 5. MAKER Agent Types & Configuration
+
+MAKER’s generalized framework uses four agent types, which Microfactory exposes through the `agents` block in the domain configuration:
+
+- **Decomposition agents**: Take a task description and propose a decomposition into smaller subtasks plus a composition function.
+- **Decomposition discriminator agents**: Vote (with first-to-ahead-by-k) among candidate decompositions.
+- **Problem solver agents**: Solve minimal subtasks without further decomposition.
+- **Solution discriminator agents**: Vote among candidate minimal-step solutions proposed by solver agents.
+
+At the Rust level these map to an `AgentKind` and corresponding configuration:
+
+```rust
+enum AgentKind {
+    Decomposition,
+    DecompositionDiscriminator,
+    Solver,
+    SolutionDiscriminator,
+}
+
+struct AgentConfig {
+    prompt_template: String,
+    model: String,
+    samples: usize,
+    k: Option<usize>, // for voting agents
+}
+```
+
+`FlowRunner` reads the per-domain `agents` configuration, instantiates `AgentConfig` values for each `AgentKind`, and wires them into the workflow graph using the tasks described above. Domains can override global settings such as `k`, `samples`, and step granularity, or rely on CLI defaults (e.g., `--k`, `--samples`, `--adaptive-k`).
 
 ## Microagent Execution Flow (Per Step)
 
 1. **Prompt Generation**: Template with local context (e.g., code snippet + error).
-2. **Sampling**: Parallel LLM calls (Tokio futures).
-3. **Voting**: Count similar outputs; select leader if ahead by `k`.
+2. **Sampling**: Parallel LLM calls (Tokio futures), subject to concurrency limits.
+3. **Voting**: Count similar outputs; select leader if ahead by `k` (fixed or adaptive).
 4. **Red-Flagging**: Check length, syntax, etc.
 5. **Apply/Verify**: Update state; run external tools (e.g., `pytest`); rollback on fail.
 
@@ -138,7 +202,8 @@ domains:
 - `anyhow` for unified errors.
 - `tracing` for logs/progress bars.
 - Retries: Max resamples per step.
-- Human-in-Loop: Stdin prompts for approval.
+- Adaptive `k`: Optionally adjust `k` based on aggregated per-step metrics (success/failure rates) when `--adaptive-k` is enabled.
+- Human-in-Loop: Stdin prompts for approval when configured triggers fire (e.g., repeated verification failures, persistent red flags, or high disagreement between agents).
 
 ## Project Structure
 ```
@@ -149,7 +214,7 @@ microfactory/
 │   ├── tasks/           # Task implementations (DecompositionTask.rs, etc.)
 │   ├── orchestrator.rs  # Graph builder and runner
 │   └── domains/         # Domain-specific logic (CodeDomain.rs)
-├── Cargo.toml           # Dependencies: clap, rig, tokio, serde, petgraph, etc.
+├── Cargo.toml           # Dependencies: clap, tokio, serde, petgraph, etc.
 └── config.yaml          # Domain presets
 ```
 
@@ -157,7 +222,6 @@ microfactory/
 ```toml
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
-rig = "0.1"  # LLM API
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -172,6 +236,67 @@ tracing = "0.1"
 ## Alternative: As an Agent Tool
 - Subcommand: `microfactory subprocess --step "propose fix" --context-json '{"code": "..."}' --samples 10`
 - Returns JSON output for integration with higher agents (e.g., Codex CLI orchestrator).
+
+## Phased Implementation Plan (for LLM Implementor)
+
+This section describes a suggested implementation sequence assuming the work is carried out by an LLM-based coding agent. Each phase should be completed and minimally validated before proceeding to the next. Do not change this architecture document from within the implementation phases.
+
+### Phase 0: Scaffold and Wiring
+
+- Create a Rust binary crate named `microfactory` with the dependencies listed in this document.
+- Implement the `clap`-based CLI with `run`, `status`, and `resume` subcommands and the options described under "CLI Interface".
+- Add a configuration loader that reads `config.yaml` into strongly-typed structs (including the `agents` and `step_granularity` blocks) with clear error messages on invalid config.
+- Define the `Context` type, `AgentKind`, `AgentConfig`, `LlmClient` trait, and `FlowRunner` skeleton (interfaces only, no real graph logic yet).
+- Add basic tests for CLI parsing and configuration loading; ensure the crate builds and these tests pass.
+
+### Phase 1: LLM Client and Sampling
+
+- Implement a concrete `LlmClient` that shells out to the `llm` executable, using `tokio::process::Command` and `llm prompt --no-stream`.
+- Implement concurrency limiting for `llm` calls using a semaphore; make the limit configurable via `--max-concurrent-llm`.
+- Expose a simple internal API `sample_n` that requests `n` responses from the configured `llm` model for a given prompt.
+- Extend the `run` subcommand so that, in a "debug" or "dry-run only" mode, it can issue a single `llm` call on the global prompt and print the response, without yet running the full workflow graph.
+- Add tests or lightweight checks around error handling for `llm` invocation (missing binary, non-zero exit code, invalid UTF-8).
+
+### Phase 2: Context and Linear Workflow
+
+- Implement the `Context` struct fully, including fields for steps, current index, domain data, and metrics (but metrics can initially be populated with placeholders).
+- Implement a minimal linear `FlowRunner` that:
+  - Treats the global prompt as a single step or uses a trivial decomposition provided by the domain.
+  - Executes only `SolveTask` and `ApplyVerifyTask` with fixed `k` and simple majority voting across solver samples.
+- Implement the `MicroTask` trait and a first set of concrete tasks for this linear flow.
+- Wire the `run` subcommand to build an initial context, execute the linear workflow, and report status and verification results.
+- Do not implement recursive decomposition or adaptive `k` yet; keep behavior simple and observable.
+
+### Phase 3: MAKER Agent Roles and Graph Expansion
+
+- Implement concrete tasks for the four MAKER roles: `DecompositionTask`, `DecompositionVoteTask`, `SolveTask`, and `SolutionVoteTask`, using the per-domain `agents` configuration (prompt templates, models, samples, and `k`).
+- Extend the `FlowRunner` to:
+  - Read `AgentConfig` entries from the loaded domain config.
+  - Construct a workflow graph that supports recursive decomposition into subtasks, followed by solving minimal subtasks and discriminating among candidate solutions.
+- Ensure the "code" domain example in this file is supported end-to-end: its YAML should parse and drive which prompts/models are used for each role.
+- Add tests or small integration runs that exercise decomposition and solution voting on synthetic tasks, even if not yet applied to a real repository.
+
+### Phase 4: Red-Flagging, Metrics, and Adaptive k
+
+- Implement a `RedFlagger` trait with built-in implementations matching the `red_flaggers` examples (e.g., length-based, syntax-based).
+- Integrate red-flagging into the workflow so that flagged responses are discarded and resampled where appropriate.
+- Populate the metrics fields in `Context` for each step: sample counts, resample counts, red-flag hits, vote margins, verification success/failure, and timings.
+- Implement an optional adaptive `k` strategy (enabled via `--adaptive-k`) that uses metrics to adjust `k` per step or step type, following the spirit of MAKER’s scaling laws (keep it simple and well-bounded).
+- Add trace logging using `tracing` for key events (decomposition decisions, vote outcomes, red flags, verification results).
+
+### Phase 5: Human-in-Loop, Persistence, and Subprocess Mode
+
+- Implement `NextAction::WaitForInput` handling so that steps can pause for human approval or intervention based on configured triggers (e.g., repeated failures, high disagreement, frequent red flags).
+- Implement persistence of `Context` and workflow state to disk (JSON or SQLite) with session IDs, and wire up the `status` and `resume` subcommands to inspect and resume sessions.
+- Implement the `microfactory subprocess` subcommand described in the "Alternative: As an Agent Tool" section, using the same internal tasks and `FlowRunner` but constrained to a single step or small subgraph.
+- Add smoke tests for resuming a session, and for using `microfactory subprocess` in a simple pipeline.
+
+### Phase 6: Hardening and Domain Expansion
+
+- Improve error messages, configuration validation, and logging for real-world use (e.g., missing templates, invalid YAML structures, unsupported domains).
+- Add additional example domains (beyond `code`) to validate genericity, reusing the same core architecture and MAKER-style agent roles.
+- Avoid premature optimization: do not introduce new dependencies or significant refactors unless required to support new domains or performance bottlenecks observed in practice.
+- Keep all phases backward-compatible with the CLI and config structures described in this document; if changes are necessary, update this document first (not as part of automated LLM implementation steps).
 
 ## Implementation Notes
 - Start prototyping with a single-task graph.

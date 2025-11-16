@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cargo test -p integration-tests "$@"
+cargo test --quiet -p integration-tests "$@"

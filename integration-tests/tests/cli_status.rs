@@ -38,7 +38,14 @@ fn status_json_lists_seeded_sessions() -> Result<()> {
     seed_session(&store, "session-cli", "Refactor batching", "code");
     seed_session(&store, "session-cli-2", "Draft brief", "analysis");
 
-    let mut cmd = Command::cargo_bin("microfactory")?;
+    let mut cmd = Command::new("cargo");
+    cmd.arg("run")
+        .arg("--quiet")
+        .arg("-p")
+        .arg("microfactory")
+        .arg("--bin")
+        .arg("microfactory")
+        .arg("--");
     let assert = cmd
         .env("MICROFACTORY_HOME", home)
         .arg("status")

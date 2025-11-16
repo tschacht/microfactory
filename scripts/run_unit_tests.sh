@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cargo test --workspace --exclude integration-tests "$@"
+cargo test --quiet --workspace --exclude integration-tests "$@"

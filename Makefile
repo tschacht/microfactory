@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help build fmt fmt-check clippy unit-test integration-test test serve clean clean-data clean-all ensure-pristine
+.PHONY: help build fmt fmt-check clippy unit-test integration-test test serve clean clean-data clean-all ensure-pristine deps-update deps-upgrade
 
 help:
 	@echo "Available targets:"
@@ -17,6 +17,8 @@ help:
 	@echo "  make clean-data         # remove persisted session data"
 	@echo "  make clean-all          # clean build + session data"
 	@echo "  make ensure-pristine    # clean, format, clippy --fix, build, and test"
+	@echo "  make deps-update        # refresh Cargo.lock within current semver ranges"
+	@echo "  make deps-upgrade       # bump Cargo.toml deps via cargo-upgrade (cargo-edit)"
 
 build:
 	cargo build --workspace
@@ -28,7 +30,7 @@ fmt-check:
 	cargo fmt -- --check
 
 clippy:
-	cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --all-features -D warnings
+	cargo clippy --fix --allow-dirty --allow-staged --workspace --all-targets --all-features -- -D warnings
 
 unit-test:
 	scripts/run_unit_tests.sh
@@ -50,8 +52,15 @@ clean-data:
 
 clean-all: clean clean-data
 
-ensure-pristine: clean
+ensure-pristine:
 	$(MAKE) fmt
 	$(MAKE) clippy
 	$(MAKE) build
 	$(MAKE) test
+
+deps-update:
+	cargo update
+
+deps-upgrade:
+	@command -v cargo-upgrade >/dev/null 2>&1 || (echo "cargo-upgrade not found. Install via 'cargo install cargo-edit'." && exit 1)
+	cargo upgrade

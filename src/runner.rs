@@ -56,10 +56,10 @@ impl FlowRunner {
             context.enqueue_work(WorkItem::Decomposition { step_id: root });
         }
 
-        if !context.has_pending_work() {
-            if let Some(root) = context.root_step_id() {
-                context.enqueue_work(WorkItem::Decomposition { step_id: root });
-            }
+        if !context.has_pending_work()
+            && let Some(root) = context.root_step_id()
+        {
+            context.enqueue_work(WorkItem::Decomposition { step_id: root });
         }
 
         while let Some(item) = context.dequeue_work() {
@@ -172,10 +172,10 @@ impl FlowRunner {
                     {
                         return Ok(self.pause_with(context, wait, WorkItem::Solve { step_id }));
                     }
-                    if let TaskEffect::StepCompleted { step_id } = result.effect {
-                        if let Some(step) = context.step(step_id) {
-                            info!(step_id, %step.description, "Step completed");
-                        }
+                    if let TaskEffect::StepCompleted { step_id } = result.effect
+                        && let Some(step) = context.step(step_id)
+                    {
+                        info!(step_id, %step.description, "Step completed");
                     }
                 }
             }
@@ -252,27 +252,27 @@ impl FlowRunner {
             return base;
         }
 
-        if let Some(stats) = context.metrics().vote_stats(agent_kind) {
-            if !stats.recent_margins.is_empty() {
-                let sum: usize = stats.recent_margins.iter().copied().sum();
-                let avg = sum as f32 / stats.recent_margins.len() as f32;
-                let mut adjusted = base;
-                if avg < base as f32 * 0.75 {
-                    adjusted = base + 1;
-                } else if avg > base as f32 * 1.5 && base > 1 {
-                    adjusted = base - 1;
-                }
-                if adjusted != base {
-                    debug!(
-                        ?agent_kind,
-                        base_k = base,
-                        adjusted_k = adjusted,
-                        avg_margin = avg,
-                        "Adaptive k adjustment"
-                    );
-                }
-                return adjusted.max(1);
+        if let Some(stats) = context.metrics().vote_stats(agent_kind)
+            && !stats.recent_margins.is_empty()
+        {
+            let sum: usize = stats.recent_margins.iter().copied().sum();
+            let avg = sum as f32 / stats.recent_margins.len() as f32;
+            let mut adjusted = base;
+            if avg < base as f32 * 0.75 {
+                adjusted = base + 1;
+            } else if avg > base as f32 * 1.5 && base > 1 {
+                adjusted = base - 1;
             }
+            if adjusted != base {
+                debug!(
+                    ?agent_kind,
+                    base_k = base,
+                    adjusted_k = adjusted,
+                    avg_margin = avg,
+                    "Adaptive k adjustment"
+                );
+            }
+            return adjusted.max(1);
         }
 
         base
@@ -320,19 +320,18 @@ impl FlowRunner {
         stage: &str,
     ) -> Option<WaitState> {
         let metrics = context.metrics().step_metrics(step_id)?;
-        if self.options.human_low_margin_threshold > 0 {
-            if let Some(margin) = metrics.vote_margin {
-                if margin <= self.options.human_low_margin_threshold {
-                    return Some(WaitState {
-                        step_id,
-                        trigger: format!("{stage}_low_margin"),
-                        details: format!(
-                            "Vote margin ({}) during {} fell below threshold",
-                            margin, stage
-                        ),
-                    });
-                }
-            }
+        if self.options.human_low_margin_threshold > 0
+            && let Some(margin) = metrics.vote_margin
+            && margin <= self.options.human_low_margin_threshold
+        {
+            return Some(WaitState {
+                step_id,
+                trigger: format!("{stage}_low_margin"),
+                details: format!(
+                    "Vote margin ({}) during {} fell below threshold",
+                    margin, stage
+                ),
+            });
         }
         None
     }
@@ -495,7 +494,7 @@ mod tests {
                 samples: 2
                 k: 2
         "#;
-        let config = Arc::new(MicrofactoryConfig::from_str(yaml).unwrap());
+        let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml).unwrap());
         let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
             vec![
                 "- step one\n- step two".into(),

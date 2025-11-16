@@ -1,16 +1,17 @@
-use std::net::SocketAddr;
-
 use anyhow::Result;
 use futures_util::StreamExt;
 use microfactory::{
     context::Context,
     persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
-    server::{ServeOptions, run as serve_run},
+    server::{ServeOptions, run_with_listener},
     status_export::{SessionDetailExport, SessionListExport},
 };
 use reqwest::Client;
 use tempfile::tempdir;
-use tokio::time::{Duration, sleep, timeout};
+use tokio::{
+    net::TcpListener,
+    time::{Duration, sleep, timeout},
+};
 
 fn seed_session(store: &SessionStore, session_id: &str, prompt: &str, domain: &str) {
     let mut ctx = Context::new(prompt, domain);
@@ -32,16 +33,6 @@ fn seed_session(store: &SessionStore, session_id: &str, prompt: &str, domain: &s
         .expect("seed session");
 }
 
-fn pick_free_port() -> u16 {
-    for port in 30000..40000 {
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            // drop listener so server can reuse the port
-            return port;
-        }
-    }
-    panic!("unable to find open port for serve test");
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_routes_return_session_json() -> Result<()> {
     let temp = tempdir()?;
@@ -49,8 +40,8 @@ async fn serve_routes_return_session_json() -> Result<()> {
     let store = SessionStore::open(Some(data_dir))?;
     seed_session(&store, "serve-session", "Summarize findings", "analysis");
 
-    let port = pick_free_port();
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let addr = listener.local_addr()?;
     let options = ServeOptions {
         default_limit: 5,
         poll_interval: Duration::from_millis(200),
@@ -58,12 +49,11 @@ async fn serve_routes_return_session_json() -> Result<()> {
 
     let server_store = store.clone();
     let handle = tokio::spawn(async move {
-        if let Err(err) = serve_run(addr, server_store, options).await {
+        if let Err(err) = run_with_listener(listener, server_store, options).await {
             eprintln!("serve task exited: {err:?}");
         }
     });
 
-    // give the server a moment to bind before issuing requests
     sleep(Duration::from_millis(250)).await;
 
     let client = Client::builder().build()?;
@@ -101,8 +91,8 @@ async fn serve_sse_stream_emits_snapshots() -> Result<()> {
     let store = SessionStore::open(Some(data_dir))?;
     seed_session(&store, "serve-sse", "Outline approach", "code");
 
-    let port = pick_free_port();
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let addr = listener.local_addr()?;
     let options = ServeOptions {
         default_limit: 5,
         poll_interval: Duration::from_millis(100),
@@ -110,7 +100,7 @@ async fn serve_sse_stream_emits_snapshots() -> Result<()> {
 
     let server_store = store.clone();
     let handle = tokio::spawn(async move {
-        if let Err(err) = serve_run(addr, server_store, options).await {
+        if let Err(err) = run_with_listener(listener, server_store, options).await {
             eprintln!("serve task exited: {err:?}");
         }
     });

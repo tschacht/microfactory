@@ -40,6 +40,8 @@ impl LlmClient for ScriptedLlm {
             Ok(batch)
         } else if batch.len() == 1 {
             Ok(vec![batch[0].clone(); n])
+        } else if batch.len() > n {
+            Ok(batch.into_iter().take(n).collect())
         } else {
             Err(anyhow!(
                 "expected scripted batch of {n} responses but saw {}",
@@ -62,7 +64,7 @@ async fn runner_pauses_and_resumes_after_low_margin_vote() -> Result<()> {
           decomposition_discriminator:
             prompt_template: "Vote:\n{{task}}\n"
             model: "mock-decompose-vote"
-            samples: 1
+            samples: 2
             k: 1
           solver:
             prompt_template: "Solve:\n{{task}}\n"
@@ -75,10 +77,10 @@ async fn runner_pauses_and_resumes_after_low_margin_vote() -> Result<()> {
             k: 2
     "#;
 
-    let config = Arc::new(MicrofactoryConfig::from_str(yaml)?);
+    let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml)?);
     let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
         vec!["- Draft patch".into()],                   // decomposition proposal
-        vec!["1".into()],                               // decomposition vote
+        vec!["1".into(), "1".into()],                   // decomposition vote
         vec!["Solution A".into(), "Solution B".into()], // solver first pass
         vec!["1".into(), "2".into()],                   // low-margin solution vote (pause)
         vec!["Solution A refined".into(), "Solution A++".into()], // solver retry

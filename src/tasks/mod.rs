@@ -89,16 +89,14 @@ impl MicroTask for DecompositionTask {
         let rendered_prompt =
             render_prompt(&self.agent.prompt_template, &self.prompt, "decomposition");
         ctx.mark_step_status(self.step_id, StepStatus::Running);
-        let responses = collect_samples_with_red_flags(
+        let responses = SampleCollector::new(
             ctx,
             self.step_id,
             self.llm.clone(),
-            rendered_prompt,
-            samples,
-            &self.agent.model,
             self.red_flags.clone(),
             "decomposition",
         )
+        .collect(rendered_prompt, samples, &self.agent.model)
         .await?;
 
         let proposals = responses
@@ -248,16 +246,14 @@ impl MicroTask for SolveTask {
             .with_context(|| format!("Unknown step {}", self.step_id))?;
         let prompt = render_prompt(&self.agent.prompt_template, &step.description, "solve");
         let samples = self.agent.samples.max(1);
-        let responses = collect_samples_with_red_flags(
+        let responses = SampleCollector::new(
             ctx,
             self.step_id,
             self.llm.clone(),
-            prompt,
-            samples,
-            &self.agent.model,
             self.red_flags.clone(),
             "solve",
         )
+        .collect(prompt, samples, &self.agent.model)
         .await?;
         if responses.is_empty() {
             return Err(anyhow!("Solver agent produced no candidates"));
@@ -385,10 +381,10 @@ fn parse_vote_response(raw: &str, max_index: usize) -> Option<usize> {
         if digits.is_empty() {
             continue;
         }
-        if let Ok(value) = digits.parse::<usize>() {
-            if (1..=max_index).contains(&value) {
-                return Some(value - 1);
-            }
+        if let Ok(value) = digits.parse::<usize>()
+            && (1..=max_index).contains(&value)
+        {
+            return Some(value - 1);
         }
     }
     None
@@ -425,94 +421,130 @@ fn vote_counts(votes: &[usize], candidate_count: usize, winner_idx: usize) -> (u
     (winner, runner_up)
 }
 
-async fn collect_samples_with_red_flags(
-    ctx: &mut Context,
+struct SampleCollector<'ctx> {
+    ctx: &'ctx mut Context,
     step_id: usize,
     llm: Arc<dyn LlmClient>,
-    prompt: String,
-    target_samples: usize,
-    model: &str,
     pipeline: Arc<RedFlagPipeline>,
     stage: &'static str,
-) -> Result<Vec<String>> {
-    if target_samples == 0 {
-        return Ok(Vec::new());
-    }
+}
 
-    if pipeline.is_empty() {
-        let responses = llm.sample_n(&prompt, target_samples, Some(model)).await?;
-        ctx.metrics
-            .record_samples(step_id, responses.len(), responses.len());
-        debug!(
+impl<'ctx> SampleCollector<'ctx> {
+    fn new(
+        ctx: &'ctx mut Context,
+        step_id: usize,
+        llm: Arc<dyn LlmClient>,
+        pipeline: Arc<RedFlagPipeline>,
+        stage: &'static str,
+    ) -> Self {
+        Self {
+            ctx,
             step_id,
+            llm,
+            pipeline,
             stage,
-            collected = responses.len(),
-            "Collected samples (no red flags)"
-        );
-        return Ok(responses);
+        }
     }
 
-    let mut accepted = Vec::new();
-    let mut attempts = 0usize;
-    let max_attempts = target_samples.max(1) * 4;
-    while accepted.len() < target_samples {
-        attempts += 1;
-        let remaining = target_samples - accepted.len();
-        let batch = llm.sample_n(&prompt, remaining, Some(model)).await?;
-        let batch_len = batch.len();
-        let before = accepted.len();
-        let mut flagged_this_round = 0usize;
-        for raw in batch {
-            let matches = pipeline.evaluate(&raw);
-            if matches.is_empty() {
-                accepted.push(raw);
-            } else {
-                flagged_this_round += 1;
-                let incidents = matches_to_incidents(matches, &raw);
-                if let Some(first) = incidents.first() {
-                    warn!(
-                        step_id,
-                        stage,
-                        flagger = %first.flagger,
-                        reason = %first.reason,
-                        "Red-flagged sample discarded"
-                    );
-                }
-                ctx.metrics.record_red_flags(step_id, incidents);
-            }
+    async fn collect(
+        self,
+        prompt: String,
+        target_samples: usize,
+        model: &str,
+    ) -> Result<Vec<String>> {
+        self.collect_inner(prompt, target_samples, model).await
+    }
+
+    async fn collect_inner(
+        self,
+        prompt: String,
+        target_samples: usize,
+        model: &str,
+    ) -> Result<Vec<String>> {
+        if target_samples == 0 {
+            return Ok(Vec::new());
         }
-        let accepted_delta = accepted.len() - before;
-        ctx.metrics
-            .record_samples(step_id, batch_len, accepted_delta);
-        if accepted.len() < target_samples {
-            ctx.metrics.record_resample(step_id);
-            if attempts >= max_attempts {
-                return Err(anyhow!(
-                    "Exceeded red-flag resample budget for step {} during {}",
-                    step_id,
-                    stage
-                ));
-            }
-        }
-        if flagged_this_round > 0 {
-            warn!(
-                step_id,
-                stage,
-                flagged = flagged_this_round,
-                accepted_delta,
-                "Flagged samples in batch"
+
+        if self.pipeline.is_empty() {
+            let responses = self
+                .llm
+                .sample_n(&prompt, target_samples, Some(model))
+                .await?;
+            self.ctx
+                .metrics
+                .record_samples(self.step_id, responses.len(), responses.len());
+            debug!(
+                step_id = self.step_id,
+                stage = self.stage,
+                collected = responses.len(),
+                "Collected samples (no red flags)"
             );
+            return Ok(responses);
         }
-    }
 
-    debug!(
-        step_id,
-        stage,
-        accepted = accepted.len(),
-        attempts,
-        "Collected samples with guardrails"
-    );
-    Ok(accepted)
+        let mut accepted = Vec::new();
+        let mut attempts = 0usize;
+        let max_attempts = target_samples.max(1) * 4;
+        while accepted.len() < target_samples {
+            attempts += 1;
+            let remaining = target_samples - accepted.len();
+            let batch = self.llm.sample_n(&prompt, remaining, Some(model)).await?;
+            let batch_len = batch.len();
+            let before = accepted.len();
+            let mut flagged_this_round = 0usize;
+            for raw in batch {
+                let matches = self.pipeline.evaluate(&raw);
+                if matches.is_empty() {
+                    accepted.push(raw);
+                } else {
+                    flagged_this_round += 1;
+                    let incidents = matches_to_incidents(matches, &raw);
+                    if let Some(first) = incidents.first() {
+                        warn!(
+                            step_id = self.step_id,
+                            stage = self.stage,
+                            flagger = %first.flagger,
+                            reason = %first.reason,
+                            "Red-flagged sample discarded"
+                        );
+                    }
+                    self.ctx.metrics.record_red_flags(self.step_id, incidents);
+                }
+            }
+            let accepted_delta = accepted.len() - before;
+            self.ctx
+                .metrics
+                .record_samples(self.step_id, batch_len, accepted_delta);
+            if accepted.len() < target_samples {
+                self.ctx.metrics.record_resample(self.step_id);
+                if attempts >= max_attempts {
+                    return Err(anyhow!(
+                        "Exceeded red-flag resample budget for step {} during {}",
+                        self.step_id,
+                        self.stage
+                    ));
+                }
+            }
+            if flagged_this_round > 0 {
+                warn!(
+                    step_id = self.step_id,
+                    stage = self.stage,
+                    flagged = flagged_this_round,
+                    accepted_delta,
+                    "Flagged samples in batch"
+                );
+            }
+        }
+
+        debug!(
+            step_id = self.step_id,
+            stage = self.stage,
+            accepted = accepted.len(),
+            attempts,
+            "Collected samples with guardrails"
+        );
+        Ok(accepted)
+    }
 }
 
 fn matches_to_incidents(matches: Vec<RedFlagMatch>, sample: &str) -> Vec<RedFlagIncident> {
@@ -655,18 +687,10 @@ mod tests {
         ]));
         let mut ctx = Context::new("demo", "code");
         let root_id = ctx.ensure_root();
-        let responses = collect_samples_with_red_flags(
-            &mut ctx,
-            root_id,
-            llm,
-            "prompt".to_string(),
-            1,
-            "model",
-            pipeline,
-            "test",
-        )
-        .await
-        .expect("collected sample");
+        let responses = SampleCollector::new(&mut ctx, root_id, llm, pipeline, "test")
+            .collect("prompt".to_string(), 1, "model")
+            .await
+            .expect("collected sample");
 
         assert_eq!(responses.len(), 1);
         assert_eq!(ctx.metrics.red_flag_hits, 1);

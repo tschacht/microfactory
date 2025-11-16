@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 /// Runtime context shared across microtasks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Context {
     pub session_id: String,
     pub prompt: String,
@@ -19,27 +19,6 @@ pub struct Context {
     pub pending_solutions: HashMap<usize, Vec<String>>,
     pub work_queue: VecDeque<WorkItem>,
     pub wait_state: Option<WaitState>,
-}
-
-impl Default for Context {
-    fn default() -> Self {
-        Self {
-            session_id: String::new(),
-            prompt: String::new(),
-            domain: String::new(),
-            steps: Vec::new(),
-            current_step: 0,
-            metrics: WorkflowMetrics::default(),
-            domain_data: HashMap::new(),
-            dry_run: false,
-            next_step_id: 0,
-            root_step_id: None,
-            pending_decompositions: HashMap::new(),
-            pending_solutions: HashMap::new(),
-            work_queue: VecDeque::new(),
-            wait_state: None,
-        }
-    }
 }
 
 impl Context {
@@ -166,12 +145,11 @@ impl Context {
     }
 
     pub fn clear_wait_state(&mut self) {
-        if let Some(wait) = self.wait_state.take() {
-            if let Some(step) = self.step_mut(wait.step_id) {
-                if matches!(step.status, StepStatus::WaitingOnInput) {
-                    step.status = StepStatus::Pending;
-                }
-            }
+        if let Some(wait) = self.wait_state.take()
+            && let Some(step) = self.step_mut(wait.step_id)
+            && matches!(step.status, StepStatus::WaitingOnInput)
+        {
+            step.status = StepStatus::Pending;
         }
     }
 

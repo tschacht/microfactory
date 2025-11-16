@@ -14,7 +14,7 @@ use uuid::Uuid;
 use microfactory::{
     cli::{Cli, Commands, LlmProvider, ResumeArgs, RunArgs, ServeArgs, StatusArgs, SubprocessArgs},
     config::MicrofactoryConfig,
-    context::{Context, StepMetrics, StepStatus, WaitState, WorkItem, WorkflowMetrics},
+    context::{Context, StepMetrics, WorkItem},
     llm::{LlmClient, RigLlmClient},
     paths::home_env_path,
     persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
@@ -377,21 +377,21 @@ fn normalize_key(value: Option<String>) -> Option<String> {
 
 fn ensure_home_env_loaded() {
     HOME_ENV_ONCE.get_or_init(|| {
-        if let Some(path) = home_env_path() {
-            if let Ok(contents) = fs::read_to_string(&path) {
-                apply_env_contents(&contents);
-            }
+        if let Some(path) = home_env_path()
+            && let Ok(contents) = fs::read_to_string(&path)
+        {
+            apply_env_contents(&contents);
         }
     });
 }
 
 fn apply_env_contents(contents: &str) {
     for line in contents.lines() {
-        if let Some((key, value)) = parse_env_assignment(line) {
-            if std::env::var_os(&key).is_none() {
-                unsafe {
-                    std::env::set_var(&key, &value);
-                }
+        if let Some((key, value)) = parse_env_assignment(line)
+            && std::env::var_os(&key).is_none()
+        {
+            unsafe {
+                std::env::set_var(&key, &value);
             }
         }
     }
@@ -417,12 +417,11 @@ fn parse_env_assignment(line: &str) -> Option<(String, String)> {
 
 fn normalize_env_value(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.len() >= 2 {
-        if (trimmed.starts_with('\"') && trimmed.ends_with('\"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-        {
-            return trimmed[1..trimmed.len() - 1].to_string();
-        }
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('\"') && trimmed.ends_with('\"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        return trimmed[1..trimmed.len() - 1].to_string();
     }
     trimmed.to_string()
 }
@@ -448,6 +447,27 @@ struct SubprocessOutput {
     candidate_solutions: Vec<String>,
     winning_solution: Option<String>,
     metrics: Option<StepMetrics>,
+}
+
+fn ensure_domain_exists(config: &Arc<MicrofactoryConfig>, domain: &str) -> Result<()> {
+    if config.domain(domain).is_none() {
+        let available = if config.domains.is_empty() {
+            "<none>".to_string()
+        } else {
+            config
+                .domains
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(anyhow!(
+            "Domain '{}' not defined in provided configuration. Available domains: {}",
+            domain,
+            available
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -541,25 +561,4 @@ mod tests {
             std::env::remove_var(EXISTING_VAR);
         }
     }
-}
-
-fn ensure_domain_exists(config: &Arc<MicrofactoryConfig>, domain: &str) -> Result<()> {
-    if config.domain(domain).is_none() {
-        let available = if config.domains.is_empty() {
-            "<none>".to_string()
-        } else {
-            config
-                .domains
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        return Err(anyhow!(
-            "Domain '{}' not defined in provided configuration. Available domains: {}",
-            domain,
-            available
-        ));
-    }
-    Ok(())
 }

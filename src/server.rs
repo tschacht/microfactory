@@ -16,6 +16,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json;
+use tokio::net::TcpListener;
 use tokio_stream::{StreamExt, wrappers::IntervalStream};
 use tracing::info;
 
@@ -40,14 +41,27 @@ impl Default for ServeOptions {
 }
 
 pub async fn run(addr: SocketAddr, store: SessionStore, options: ServeOptions) -> Result<()> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .context("failed to bind session service listener")?;
+    run_with_listener(listener, store, options).await
+}
+
+pub async fn run_with_listener(
+    listener: TcpListener,
+    store: SessionStore,
+    options: ServeOptions,
+) -> Result<()> {
     let state = Arc::new(ServeState::new(store, options));
     let router = build_router(state);
-    info!(%addr, "microfactory serve listening");
-    axum::Server::bind(&addr)
-        .serve(router.into_make_service())
+    if let Ok(addr) = listener.local_addr() {
+        info!(%addr, "microfactory serve listening");
+    } else {
+        info!("microfactory serve listening");
+    }
+    axum::serve(listener, router.into_make_service())
         .await
-        .context("serve endpoint failed")?;
-    Ok(())
+        .context("serve endpoint failed")
 }
 
 #[derive(Clone)]
@@ -87,7 +101,7 @@ impl ServeState {
     }
 }
 
-pub fn build_router(state: Arc<ServeState>) -> Router {
+fn build_router(state: Arc<ServeState>) -> Router {
     Router::new()
         .route("/sessions", get(list_sessions_handler))
         .route("/sessions/:id", get(session_detail_handler))
@@ -139,24 +153,22 @@ async fn stream_sessions_handler(State(state): State<Arc<ServeState>>) -> impl I
                     tracing::error!(error = %err, "serve stream failed to list sessions");
                 })
                 .ok();
-            if let Some(export) = payload {
+            let event = if let Some(export) = payload {
                 match serde_json::to_string(&export) {
-                    Ok(json) => Ok(Event::default().data(json)),
+                    Ok(json) => Event::default().data(json),
                     Err(err) => {
                         tracing::error!(error = %err, "failed to serialize session export");
-                        Ok(Event::default().comment("serialization_error"))
+                        Event::default().comment("serialization_error")
                     }
                 }
             } else {
-                Ok(Event::default().comment("snapshot_error"))
-            }
-            .map(|event| {
-                tracing::trace!(
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "serve stream event ready"
-                );
-                event
-            })
+                Event::default().comment("snapshot_error")
+            };
+            tracing::trace!(
+                elapsed_ms = start.elapsed().as_millis(),
+                "serve stream event ready"
+            );
+            Result::<Event, Infallible>::Ok(event)
         }
     });
 
@@ -170,6 +182,7 @@ mod tests {
         context::Context,
         persistence::{SessionEnvelope, SessionMetadata, SessionStatus},
     };
+    use axum::body::Body;
     use tempfile::tempdir;
     use tower::ServiceExt;
 
@@ -184,7 +197,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/sessions")
-                    .body(())
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -202,7 +215,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/sessions/missing")
-                    .body(())
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await

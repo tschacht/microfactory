@@ -1,11 +1,11 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     context::{Context, WaitState, WorkflowMetrics},
     persistence::{SessionMetadata, SessionRecord, SessionSummary},
 };
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SessionListExport {
     pub sessions: Vec<SessionSummaryExport>,
 }
@@ -21,7 +21,7 @@ impl SessionListExport {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SessionSummaryExport {
     pub session_id: String,
     pub status: String,
@@ -42,7 +42,7 @@ impl From<SessionSummary> for SessionSummaryExport {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SessionDetailExport {
     pub session_id: String,
     pub status: String,

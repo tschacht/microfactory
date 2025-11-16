@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -18,7 +19,7 @@ impl MicrofactoryConfig {
         let path_ref = path.as_ref();
         let raw = fs::read_to_string(path_ref)
             .with_context(|| format!("Failed to read config file at {}", path_ref.display()))?;
-        let mut config = Self::from_str(&raw)
+        let mut config = Self::from_yaml_str(&raw)
             .with_context(|| format!("Invalid configuration in {}", path_ref.display()))?;
         let base_dir = path_ref.parent().unwrap_or_else(|| Path::new("."));
         config
@@ -28,7 +29,7 @@ impl MicrofactoryConfig {
         Ok(config)
     }
 
-    pub fn from_str(yaml: &str) -> Result<Self> {
+    pub fn from_yaml_str(yaml: &str) -> Result<Self> {
         let config: Self = serde_yaml::from_str(yaml).context("Unable to parse config YAML")?;
         config.validate()?;
         Ok(config)
@@ -57,6 +58,14 @@ impl MicrofactoryConfig {
             domain.hydrate_templates(base)?;
         }
         Ok(())
+    }
+}
+
+impl FromStr for MicrofactoryConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_yaml_str(s)
     }
 }
 
@@ -311,7 +320,7 @@ mod tests {
                 max_tokens: 200
         "#;
 
-        let config = MicrofactoryConfig::from_str(yaml).expect("valid config");
+        let config = MicrofactoryConfig::from_yaml_str(yaml).expect("valid config");
         let domain = config.domain("code").expect("code domain exists");
         assert_eq!(
             domain.red_flaggers.first().expect("red flagger").kind,
@@ -391,7 +400,7 @@ domains:
               - type: "length"
         "#;
 
-        let err = MicrofactoryConfig::from_str(yaml).unwrap_err();
+        let err = MicrofactoryConfig::from_yaml_str(yaml).unwrap_err();
         let messages: Vec<String> = err.chain().map(|cause| cause.to_string()).collect();
         assert!(
             messages.iter().any(|msg| msg.contains("max_tokens")),

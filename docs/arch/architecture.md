@@ -272,6 +272,8 @@ This section describes a suggested implementation sequence assuming the work is 
 - Wire the `run` subcommand to build an initial context, execute the linear workflow, and report status and verification results.
 - Do not implement recursive decomposition or adaptive `k` yet; keep behavior simple and observable.
 
+**Implementation Status (Nov 16, 2025):** Completed. `Context` now owns a hierarchical step tree with parent/child links, per-step depth, solution buffers, and pending decomposition/solution queues so that microtasks can pass data without extra globals. `WorkflowMetrics` tracks sample/vote counters, and helper APIs expose `ensure_root`, `add_child_step`, and status mutation utilities. The `MicroTask` trait plus concrete solver tasks drive a minimal linear pipeline inside `FlowRunner`, which is now wired to the CLI `run` command so real executions mutate the context rather than logging placeholders.
+
 ### Phase 3: MAKER Agent Roles and Graph Expansion
 
 - Implement concrete tasks for the four MAKER roles: `DecompositionTask`, `DecompositionVoteTask`, `SolveTask`, and `SolutionVoteTask`, using the per-domain `agents` configuration (prompt templates, models, samples, and `k`).
@@ -280,6 +282,8 @@ This section describes a suggested implementation sequence assuming the work is 
   - Construct a workflow graph that supports recursive decomposition into subtasks, followed by solving minimal subtasks and discriminating among candidate solutions.
 - Ensure the "code" domain example in this file is supported end-to-end: its YAML should parse and drive which prompts/models are used for each role.
 - Add tests or small integration runs that exercise decomposition and solution voting on synthetic tasks, even if not yet applied to a real repository.
+
+**Implementation Status (Nov 16, 2025):** Completed. The `tasks` module now implements MAKER's four agent roles (`DecompositionTask`, `DecompositionVoteTask`, `SolveTask`, `SolutionVoteTask`) with shared `NextAction`/`TaskEffect` plumbing plus first-to-ahead-by-`k` voting helpers. `FlowRunner` builds a `petgraph`-backed workflow DAG, instantiates agents from the per-domain `agents` config (including per-role prompts/models/samples/`k`), and recursively expands subtasks until they reach solver depth, then routes results through solution discriminators. A scripted `cargo test` covers the end-to-end graph on synthetic prompts to ensure decomposition, solving, and voting cooperate without hitting the real providers.
 
 ### Phase 4: Red-Flagging, Metrics, and Adaptive k
 

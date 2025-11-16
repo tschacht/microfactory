@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 /// Runtime context shared across microtasks.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Context {
     pub session_id: String,
     pub prompt: String,
@@ -11,26 +11,179 @@ pub struct Context {
     pub metrics: WorkflowMetrics,
     pub domain_data: HashMap<String, String>,
     pub dry_run: bool,
+    pub next_step_id: usize,
+    pub root_step_id: Option<usize>,
+    pub pending_decompositions: HashMap<usize, Vec<DecompositionProposal>>,
+    pub pending_solutions: HashMap<usize, Vec<String>>,
 }
 
-impl Context {
-    pub fn new(prompt: impl Into<String>, domain: impl Into<String>) -> Self {
+impl Default for Context {
+    fn default() -> Self {
         Self {
             session_id: String::new(),
-            prompt: prompt.into(),
-            domain: domain.into(),
+            prompt: String::new(),
+            domain: String::new(),
             steps: Vec::new(),
             current_step: 0,
             metrics: WorkflowMetrics::default(),
             domain_data: HashMap::new(),
             dry_run: false,
+            next_step_id: 0,
+            root_step_id: None,
+            pending_decompositions: HashMap::new(),
+            pending_solutions: HashMap::new(),
         }
     }
 }
 
-#[derive(Debug, Default, Clone)]
+impl Context {
+    pub fn new(prompt: impl Into<String>, domain: impl Into<String>) -> Self {
+        let prompt_str = prompt.into();
+        let mut ctx = Self {
+            prompt: prompt_str.clone(),
+            domain: domain.into(),
+            ..Self::default()
+        };
+        let root = ctx.create_step(prompt_str, None, 0);
+        ctx.root_step_id = Some(root);
+        ctx.current_step = root;
+        ctx
+    }
+
+    pub fn ensure_root(&mut self) -> usize {
+        if let Some(id) = self.root_step_id {
+            id
+        } else {
+            let prompt = if self.prompt.is_empty() {
+                "root task".to_string()
+            } else {
+                self.prompt.clone()
+            };
+            let id = self.create_step(prompt, None, 0);
+            self.root_step_id = Some(id);
+            self.current_step = id;
+            id
+        }
+    }
+
+    pub fn add_child_step(&mut self, parent: usize, description: impl Into<String>) -> usize {
+        let depth = self
+            .steps
+            .iter()
+            .find(|step| step.id == parent)
+            .map(|step| step.depth + 1)
+            .unwrap_or(0);
+        let id = self.create_step(description.into(), Some(parent), depth);
+        if let Some(parent_step) = self.steps.iter_mut().find(|step| step.id == parent) {
+            parent_step.children.push(id);
+        }
+        id
+    }
+
+    pub fn step(&self, step_id: usize) -> Option<&WorkflowStep> {
+        self.steps.iter().find(|step| step.id == step_id)
+    }
+
+    pub fn step_mut(&mut self, step_id: usize) -> Option<&mut WorkflowStep> {
+        self.steps.iter_mut().find(|step| step.id == step_id)
+    }
+
+    pub fn register_decomposition(
+        &mut self,
+        step_id: usize,
+        proposals: Vec<DecompositionProposal>,
+    ) {
+        self.pending_decompositions.insert(step_id, proposals);
+        self.metrics.decomposition_runs += 1;
+    }
+
+    pub fn take_decomposition(&mut self, step_id: usize) -> Option<Vec<DecompositionProposal>> {
+        self.pending_decompositions.remove(&step_id)
+    }
+
+    pub fn register_solutions(&mut self, step_id: usize, candidates: Vec<String>) {
+        if let Some(step) = self.step_mut(step_id) {
+            step.candidate_solutions = candidates.clone();
+        }
+        self.pending_solutions.insert(step_id, candidates);
+        self.metrics.solve_runs += 1;
+    }
+
+    pub fn take_solutions(&mut self, step_id: usize) -> Option<Vec<String>> {
+        self.pending_solutions.remove(&step_id)
+    }
+
+    pub fn mark_step_solution(&mut self, step_id: usize, winner: String) {
+        if let Some(step) = self.step_mut(step_id) {
+            step.winning_solution = Some(winner);
+            step.status = StepStatus::Completed;
+        }
+    }
+
+    pub fn mark_step_status(&mut self, step_id: usize, status: StepStatus) {
+        if let Some(step) = self.step_mut(step_id) {
+            step.status = status;
+        }
+    }
+
+    pub fn root_step_id(&self) -> Option<usize> {
+        self.root_step_id
+    }
+
+    fn create_step(&mut self, description: String, parent: Option<usize>, depth: usize) -> usize {
+        let id = self.next_step_id;
+        self.next_step_id += 1;
+        self.steps
+            .push(WorkflowStep::new(id, description, parent, depth));
+        id
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct WorkflowStep {
+    pub id: usize,
     pub description: String,
+    pub parent: Option<usize>,
+    pub depth: usize,
+    pub status: StepStatus,
+    pub children: Vec<usize>,
+    pub candidate_solutions: Vec<String>,
+    pub winning_solution: Option<String>,
+}
+
+impl WorkflowStep {
+    fn new(id: usize, description: String, parent: Option<usize>, depth: usize) -> Self {
+        Self {
+            id,
+            description,
+            parent,
+            depth,
+            status: StepStatus::Pending,
+            children: Vec::new(),
+            candidate_solutions: Vec::new(),
+            winning_solution: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStatus {
+    Pending,
+    Running,
+    Completed,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecompositionProposal {
+    pub id: usize,
+    pub raw: String,
+    pub subtasks: Vec<String>,
+}
+
+impl DecompositionProposal {
+    pub fn new(id: usize, raw: String, subtasks: Vec<String>) -> Self {
+        Self { id, raw, subtasks }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -38,6 +191,8 @@ pub struct WorkflowMetrics {
     pub sample_count: usize,
     pub resample_count: usize,
     pub vote_attempts: usize,
+    pub decomposition_runs: usize,
+    pub solve_runs: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

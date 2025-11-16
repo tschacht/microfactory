@@ -12,7 +12,7 @@ use microfactory::{
     config::MicrofactoryConfig,
     context::Context,
     llm::{LlmClient, RigLlmClient},
-    runner::FlowRunner,
+    runner::{FlowRunner, RunnerOptions},
 };
 
 static HOME_ENV_ONCE: OnceLock<()> = OnceLock::new();
@@ -33,6 +33,7 @@ async fn run_command(args: RunArgs) -> Result<()> {
     ensure_domain_exists(&config, &args.domain)?;
 
     let llm_client: Arc<dyn LlmClient> = Arc::new(create_llm_client(&args)?);
+    let runner_options = RunnerOptions::from_cli(args.samples, args.k, args.adaptive_k);
     let mut context = Context::new(&args.prompt, &args.domain);
     context.dry_run = args.dry_run;
 
@@ -41,14 +42,14 @@ async fn run_command(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    let runner = FlowRunner::new(config, Some(llm_client));
+    let runner = FlowRunner::new(config, Some(llm_client), runner_options);
     runner.execute(&mut context).await?;
     Ok(())
 }
 
 async fn status_command(args: StatusArgs) -> Result<()> {
     let config = Arc::new(load_config(&default_config_path())?);
-    let runner = FlowRunner::new(config, None);
+    let runner = FlowRunner::new(config, None, RunnerOptions::default());
     runner.status(args.session_id.as_deref())?;
     Ok(())
 }
@@ -58,7 +59,7 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
     let mut context = Context::default();
     context.session_id = args.session_id;
 
-    let runner = FlowRunner::new(config, None);
+    let runner = FlowRunner::new(config, None, RunnerOptions::default());
     runner.execute(&mut context).await?;
     Ok(())
 }
@@ -183,7 +184,7 @@ async fn run_dry_run_probe(args: &RunArgs, llm: Arc<dyn LlmClient>) -> Result<()
         "[dry-run] probing model '{}' with prompt...",
         args.llm_model
     );
-    let response = llm.sample(&args.prompt).await?;
+    let response = llm.sample(&args.prompt, Some(&args.llm_model)).await?;
     println!("--- LLM Response Start ---\n{response}\n--- LLM Response End ---");
     Ok(())
 }
@@ -219,7 +220,7 @@ mod tests {
 
         #[async_trait]
         impl LlmClient for FailingClient {
-            async fn sample(&self, _: &str) -> Result<String> {
+            async fn sample(&self, _: &str, _: Option<&str>) -> Result<String> {
                 Err(anyhow!("boom"))
             }
         }

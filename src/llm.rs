@@ -11,12 +11,12 @@ use crate::cli::LlmProvider;
 /// Abstraction over whichever LLM backend is configured.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn sample(&self, prompt: &str) -> Result<String>;
+    async fn sample(&self, prompt: &str, model: Option<&str>) -> Result<String>;
 
-    async fn sample_n(&self, prompt: &str, n: usize) -> Result<Vec<String>> {
+    async fn sample_n(&self, prompt: &str, n: usize, model: Option<&str>) -> Result<Vec<String>> {
         let mut outputs = Vec::with_capacity(n);
         for _ in 0..n {
-            outputs.push(self.sample(prompt).await?);
+            outputs.push(self.sample(prompt, model).await?);
         }
         Ok(outputs)
     }
@@ -30,7 +30,7 @@ pub struct RigLlmClient {
 
 struct RigLlmClientInner {
     provider: LlmProvider,
-    model: String,
+    default_model: String,
     api_key: String,
     semaphore: Arc<Semaphore>,
 }
@@ -47,8 +47,8 @@ impl RigLlmClient {
             return Err(anyhow!("API key may not be empty"));
         }
 
-        let model = model.into();
-        if model.trim().is_empty() {
+        let default_model = model.into();
+        if default_model.trim().is_empty() {
             return Err(anyhow!("Model identifier may not be empty"));
         }
 
@@ -56,7 +56,7 @@ impl RigLlmClient {
         Ok(Self {
             inner: Arc::new(RigLlmClientInner {
                 provider,
-                model,
+                default_model,
                 api_key,
                 semaphore: Arc::new(Semaphore::new(limit)),
             }),
@@ -68,14 +68,14 @@ impl std::fmt::Debug for RigLlmClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RigLlmClient")
             .field("provider", &self.inner.provider)
-            .field("model", &self.inner.model)
+            .field("default_model", &self.inner.default_model)
             .finish()
     }
 }
 
 #[async_trait]
 impl LlmClient for RigLlmClient {
-    async fn sample(&self, prompt: &str) -> Result<String> {
+    async fn sample(&self, prompt: &str, model_override: Option<&str>) -> Result<String> {
         let permit = self
             .inner
             .semaphore
@@ -84,12 +84,13 @@ impl LlmClient for RigLlmClient {
             .await
             .context("Semaphore closed while waiting for LLM slot")?;
 
+        let model = model_override.unwrap_or(&self.inner.default_model);
         let agent = {
             let builder = DynClientBuilder::new();
             let agent_builder = builder
                 .agent_with_api_key_val(
                     self.inner.provider.provider_id(),
-                    &self.inner.model,
+                    model,
                     ProviderValue::Simple(self.inner.api_key.clone()),
                 )
                 .map_err(|err| anyhow!("Failed to create agent: {err}"))?;
@@ -104,16 +105,18 @@ impl LlmClient for RigLlmClient {
         response
     }
 
-    async fn sample_n(&self, prompt: &str, n: usize) -> Result<Vec<String>> {
+    async fn sample_n(&self, prompt: &str, n: usize, model: Option<&str>) -> Result<Vec<String>> {
         if n == 0 {
             return Ok(Vec::new());
         }
 
         let mut join_set = JoinSet::new();
+        let model_owned = model.map(|m| m.to_string());
         for _ in 0..n {
             let prompt = prompt.to_owned();
             let client = self.clone();
-            join_set.spawn(async move { client.sample(&prompt).await });
+            let model = model_owned.clone();
+            join_set.spawn(async move { client.sample(&prompt, model.as_deref()).await });
         }
 
         let mut outputs = Vec::with_capacity(n);

@@ -310,6 +310,9 @@ This section describes a suggested implementation sequence assuming the work is 
 - Add additional example domains (beyond `code`) to validate genericity, reusing the same core architecture and MAKER-style agent roles.
 - Avoid premature optimization: do not introduce new dependencies or significant refactors unless required to support new domains or performance bottlenecks observed in practice.
 - Keep all phases backward-compatible with the CLI and config structures described in this document; if changes are necessary, update this document first (not as part of automated LLM implementation steps).
+- Surface session summaries (e.g., structured JSON export from `microfactory status`) so external orchestrators can monitor workflows without scraping stdout.
+
+**Implementation Status (Nov 16, 2025):** Completed. `config.rs` now validates each domain’s agents, granularity, and red-flaggers while hydrating prompt templates from disk, and the repository ships Handlebars templates for both the existing `code` preset and a new `analysis` domain to demonstrate cross-domain coverage. The CLI’s `status` command gained `--json`/`--limit` flags so higher-level tooling can pull machine-readable session summaries, while runtime errors now enumerate available domains when a mismatch occurs. `config.yaml` documents the expanded domains, and `templates/` holds the prompts referenced by the configuration, ensuring hardening + domain expansion goals are met.
 
 ## Implementation Notes
 - Start prototyping with a single-task graph.

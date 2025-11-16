@@ -27,3 +27,31 @@ domains:
         max_tokens: 2048
       - type: "syntax"
         language: "python"
+  analysis:
+    agents:
+      decomposition:
+        prompt_template: "templates/analysis_decompose.hbs"
+        model: "claude-3.5-haiku"
+        samples: 2
+      decomposition_discriminator:
+        prompt_template: "templates/analysis_decompose_vote.hbs"
+        model: "claude-3.5-haiku"
+        samples: 2
+        k: 2
+      solver:
+        prompt_template: "templates/analysis_solve_step.hbs"
+        model: "gemini-1.5-pro"
+        samples: 4
+      solution_discriminator:
+        prompt_template: "templates/analysis_solution_vote.hbs"
+        model: "gemini-1.5-pro"
+        samples: 2
+        k: 2
+    step_granularity:
+      max_files: 1
+      max_lines_changed: 5
+    red_flaggers:
+      - type: "length"
+        max_tokens: 1536
+      - type: "syntax"
+        language: "markdown"

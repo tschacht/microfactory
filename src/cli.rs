@@ -75,10 +75,30 @@ pub struct RunArgs {
     pub dry_run: bool,
 }
 
-#[derive(Debug, Args, Clone, Default)]
+#[derive(Debug, Args, Clone)]
 pub struct StatusArgs {
     #[arg(long, help = "Optional session identifier to inspect")]
     pub session_id: Option<String>,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Maximum number of sessions to list when no ID is provided"
+    )]
+    pub limit: usize,
+
+    #[arg(long, help = "Emit JSON instead of human-readable output")]
+    pub json: bool,
+}
+
+impl Default for StatusArgs {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            limit: 10,
+            json: false,
+        }
+    }
 }
 
 #[derive(Debug, Args, Clone)]
@@ -243,6 +263,19 @@ mod tests {
                 assert!(run.dry_run);
             }
             _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_status_with_json_limit() {
+        let cli = Cli::parse_from(["microfactory", "status", "--json", "--limit", "5"]);
+
+        match cli.command {
+            Commands::Status(status) => {
+                assert!(status.json);
+                assert_eq!(status.limit, 5);
+            }
+            _ => panic!("Expected status command"),
         }
     }
 }

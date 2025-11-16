@@ -12,10 +12,13 @@ use uuid::Uuid;
 use microfactory::{
     cli::{Cli, Commands, LlmProvider, ResumeArgs, RunArgs, StatusArgs, SubprocessArgs},
     config::MicrofactoryConfig,
-    context::{Context, StepMetrics, StepStatus, WorkItem},
+    context::{Context, StepMetrics, StepStatus, WaitState, WorkItem, WorkflowMetrics},
     llm::{LlmClient, RigLlmClient},
     paths::home_env_path,
-    persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
+    persistence::{
+        SessionEnvelope, SessionMetadata, SessionRecord, SessionStatus, SessionStore,
+        SessionSummary,
+    },
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
 };
 
@@ -115,24 +118,33 @@ async fn status_command(args: StatusArgs) -> Result<()> {
     let store = SessionStore::open(None)?;
     if let Some(id) = args.session_id {
         let record = store.load(&id)?;
-        println!("Session: {}", id);
-        println!("Status: {}", record.status.as_str());
-        println!("Prompt: {}", record.envelope.context.prompt);
-        println!("Domain: {}", record.envelope.context.domain);
-        println!("Updated: {}", record.updated_at);
-        if let Some(wait) = &record.envelope.context.wait_state {
+        if args.json {
+            let summary = SessionDetailExport::from_record(&record);
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        } else {
+            println!("Session: {}", id);
+            println!("Status: {}", record.status.as_str());
+            println!("Prompt: {}", record.envelope.context.prompt);
+            println!("Domain: {}", record.envelope.context.domain);
+            println!("Updated: {}", record.updated_at);
+            if let Some(wait) = &record.envelope.context.wait_state {
+                println!(
+                    "Waiting on step {} ({}) - {}",
+                    wait.step_id, wait.trigger, wait.details
+                );
+            }
             println!(
-                "Waiting on step {} ({}) - {}",
-                wait.step_id, wait.trigger, wait.details
+                "Steps completed: {}",
+                completed_steps(&record.envelope.context)
             );
         }
-        println!(
-            "Steps completed: {}",
-            completed_steps(&record.envelope.context)
-        );
     } else {
-        let summaries = store.list(10)?;
-        if summaries.is_empty() {
+        let limit = args.limit.max(1);
+        let summaries = store.list(limit)?;
+        if args.json {
+            let payload = SessionListExport::from_summaries(summaries);
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else if summaries.is_empty() {
             println!("No sessions recorded yet.");
         } else {
             println!("Recent sessions:");
@@ -430,6 +442,75 @@ struct SubprocessOutput {
     metrics: Option<StepMetrics>,
 }
 
+#[derive(Serialize)]
+struct SessionListExport {
+    sessions: Vec<SessionSummaryExport>,
+}
+
+impl SessionListExport {
+    fn from_summaries(summaries: Vec<SessionSummary>) -> Self {
+        Self {
+            sessions: summaries
+                .into_iter()
+                .map(SessionSummaryExport::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SessionSummaryExport {
+    session_id: String,
+    status: String,
+    prompt: String,
+    domain: String,
+    updated_at: i64,
+}
+
+impl From<SessionSummary> for SessionSummaryExport {
+    fn from(value: SessionSummary) -> Self {
+        Self {
+            session_id: value.session_id,
+            status: value.status.as_str().to_string(),
+            prompt: value.prompt,
+            domain: value.domain,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SessionDetailExport {
+    session_id: String,
+    status: String,
+    prompt: String,
+    domain: String,
+    updated_at: i64,
+    wait_state: Option<WaitState>,
+    metadata: SessionMetadata,
+    completed_steps: usize,
+    total_steps: usize,
+    metrics: WorkflowMetrics,
+}
+
+impl SessionDetailExport {
+    fn from_record(record: &SessionRecord) -> Self {
+        let context = &record.envelope.context;
+        Self {
+            session_id: context.session_id.clone(),
+            status: record.status.as_str().to_string(),
+            prompt: context.prompt.clone(),
+            domain: context.domain.clone(),
+            updated_at: record.updated_at,
+            wait_state: context.wait_state.clone(),
+            metadata: record.envelope.metadata.clone(),
+            completed_steps: completed_steps(context),
+            total_steps: context.steps.len(),
+            metrics: context.metrics.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,9 +606,20 @@ mod tests {
 
 fn ensure_domain_exists(config: &Arc<MicrofactoryConfig>, domain: &str) -> Result<()> {
     if config.domain(domain).is_none() {
+        let available = if config.domains.is_empty() {
+            "<none>".to_string()
+        } else {
+            config
+                .domains
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         return Err(anyhow!(
-            "Domain '{}' not defined in provided configuration",
-            domain
+            "Domain '{}' not defined in provided configuration. Available domains: {}",
+            domain,
+            available
         ));
     }
     Ok(())

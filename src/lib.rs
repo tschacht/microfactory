@@ -6,6 +6,8 @@ pub mod paths;
 pub mod persistence;
 pub mod red_flaggers;
 pub mod runner;
+pub mod server;
+pub mod status_export;
 pub mod tasks;
 
 pub use cli::{Cli, Commands};

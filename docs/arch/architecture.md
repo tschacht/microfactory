@@ -322,7 +322,7 @@ This section describes a suggested implementation sequence assuming the work is 
 - Keep authentication simple (localhost-only token or OS permissions) and document how to deploy as a background service (systemd, tmux, etc.). Offer guidance on when to prefer this HTTP surface over a bespoke daemon: HTTP is universally consumable and easy to proxy, whereas a custom daemon/socket can be reserved for tightly coupled workflows that need bidirectional control.
 - Optional future work: layer a Unix-domain-socket daemon or message-queue publisher atop the same event stream if a particular deployment requires it, but treat that as additive, not a replacement for the HTTP surface.
 
-**Implementation Status:** Not started. This phase is intentionally scoped as an extension once real users need push-style monitoring or API access beyond the CLI.
+**Implementation Status (Nov 16, 2025):** Completed. The CLI now exposes `microfactory serve`, which binds an embedded Axum/Tokio HTTP server to configurable host/port, serving `GET /sessions` (with optional `?limit=`) and `GET /sessions/{id}` responses identical to `status --json`. A `/sessions/stream` SSE endpoint emits periodic JSON snapshots so dashboards and supervising agents can subscribe once rather than poll the CLI. The server reuses the existing SQLite `SessionStore`, enforces sensible defaults (localhost bind, rate-limited polling), and includes unit tests for the REST handlers. Future daemon/socket integrations remain optional add-ons atop this HTTP surface.
 
 ## Implementation Notes
 - Start prototyping with a single-task graph.

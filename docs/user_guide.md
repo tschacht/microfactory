@@ -141,6 +141,22 @@ Loads the stored context + metadata, clears wait states, and continues execution
 
 Executes a single step using the solver + solution discriminator stack and prints structured JSON. Useful when embedding Microfactory as a helper tool inside larger agent systems.
 
+### 7.5 `microfactory serve`
+
+Runs an embedded HTTP server that mirrors the `status --json` outputs:
+
+```
+microfactory serve --bind 0.0.0.0 --port 8080 --limit 50 --poll-interval-ms 1500
+```
+
+Endpoints:
+
+- `GET /sessions[?limit=N]` – JSON list of recent sessions.
+- `GET /sessions/{id}` – Detailed payload for a specific session.
+- `GET /sessions/stream` – Server-Sent Events stream emitting periodic JSON snapshots (same schema as `/sessions`).
+
+Run it on localhost (default) or behind a reverse proxy to feed dashboards or supervising agents without spawning the CLI repeatedly.
+
 ## 8. Execution Flow
 
 For each step:

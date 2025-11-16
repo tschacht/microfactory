@@ -21,6 +21,8 @@ pub enum Commands {
     Resume(ResumeArgs),
     /// Execute a single-step subprocess workflow and emit JSON.
     Subprocess(SubprocessArgs),
+    /// Serve session data over HTTP (REST + SSE).
+    Serve(ServeArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -185,6 +187,33 @@ pub struct SubprocessArgs {
     pub max_concurrent_llm: usize,
 }
 
+#[derive(Debug, Args, Clone)]
+pub struct ServeArgs {
+    #[arg(
+        long,
+        default_value = "127.0.0.1",
+        help = "Bind interface for the HTTP server"
+    )]
+    pub bind: String,
+
+    #[arg(long, default_value_t = 8080, help = "Port for the HTTP server")]
+    pub port: u16,
+
+    #[arg(
+        long,
+        default_value_t = 25,
+        help = "Default session list limit when not specified by clients"
+    )]
+    pub limit: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "Polling interval for SSE stream in milliseconds"
+    )]
+    pub poll_interval_ms: u64,
+}
+
 /// Supported LLM providers surfaced via the CLI.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 #[clap(rename_all = "lower")]
@@ -276,6 +305,32 @@ mod tests {
                 assert_eq!(status.limit, 5);
             }
             _ => panic!("Expected status command"),
+        }
+    }
+
+    #[test]
+    fn parses_serve_command() {
+        let cli = Cli::parse_from([
+            "microfactory",
+            "serve",
+            "--bind",
+            "0.0.0.0",
+            "--port",
+            "9090",
+            "--limit",
+            "5",
+            "--poll-interval-ms",
+            "500",
+        ]);
+
+        match cli.command {
+            Commands::Serve(args) => {
+                assert_eq!(args.bind, "0.0.0.0");
+                assert_eq!(args.port, 9090);
+                assert_eq!(args.limit, 5);
+                assert_eq!(args.poll_interval_ms, 500);
+            }
+            _ => panic!("expected serve command"),
         }
     }
 }

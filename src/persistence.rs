@@ -81,6 +81,7 @@ pub struct SessionRecord {
 }
 
 /// Simple SQLite-backed store for session data.
+#[derive(Clone)]
 pub struct SessionStore {
     db_path: PathBuf,
 }

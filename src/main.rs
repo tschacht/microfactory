@@ -1,7 +1,9 @@
 use std::{
     fs,
+    net::SocketAddr,
     path::PathBuf,
     sync::{Arc, OnceLock},
+    time::Duration,
 };
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
@@ -10,16 +12,15 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use microfactory::{
-    cli::{Cli, Commands, LlmProvider, ResumeArgs, RunArgs, StatusArgs, SubprocessArgs},
+    cli::{Cli, Commands, LlmProvider, ResumeArgs, RunArgs, ServeArgs, StatusArgs, SubprocessArgs},
     config::MicrofactoryConfig,
     context::{Context, StepMetrics, StepStatus, WaitState, WorkItem, WorkflowMetrics},
     llm::{LlmClient, RigLlmClient},
     paths::home_env_path,
-    persistence::{
-        SessionEnvelope, SessionMetadata, SessionRecord, SessionStatus, SessionStore,
-        SessionSummary,
-    },
+    persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
+    server::{self, ServeOptions},
+    status_export::{SessionDetailExport, SessionListExport, count_completed_steps},
 };
 
 static HOME_ENV_ONCE: OnceLock<()> = OnceLock::new();
@@ -32,6 +33,7 @@ async fn main() -> Result<()> {
         Commands::Status(args) => status_command(args).await?,
         Commands::Resume(args) => resume_command(args).await?,
         Commands::Subprocess(args) => subprocess_command(args).await?,
+        Commands::Serve(args) => serve_command(args).await?,
     }
     Ok(())
 }
@@ -135,7 +137,7 @@ async fn status_command(args: StatusArgs) -> Result<()> {
             }
             println!(
                 "Steps completed: {}",
-                completed_steps(&record.envelope.context)
+                count_completed_steps(&record.envelope.context)
             );
         }
     } else {
@@ -317,6 +319,19 @@ async fn subprocess_command(args: SubprocessArgs) -> Result<()> {
     Ok(())
 }
 
+async fn serve_command(args: ServeArgs) -> Result<()> {
+    let addr: SocketAddr = format!("{}:{}", args.bind, args.port)
+        .parse()
+        .context("Invalid bind/port combination for serve command")?;
+    let store = SessionStore::open(None)?;
+    let options = ServeOptions {
+        default_limit: args.limit.max(1),
+        poll_interval: Duration::from_millis(args.poll_interval_ms.max(250)),
+    };
+    println!("Serving session API on http://{addr}");
+    server::run(addr, store, options).await
+}
+
 fn load_config(path: &PathBuf) -> Result<MicrofactoryConfig> {
     MicrofactoryConfig::from_path(path)
 }
@@ -426,13 +441,6 @@ fn new_session_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-fn completed_steps(ctx: &Context) -> usize {
-    ctx.steps
-        .iter()
-        .filter(|step| matches!(step.status, StepStatus::Completed))
-        .count()
-}
-
 #[derive(Serialize)]
 struct SubprocessOutput {
     session_id: String,
@@ -440,75 +448,6 @@ struct SubprocessOutput {
     candidate_solutions: Vec<String>,
     winning_solution: Option<String>,
     metrics: Option<StepMetrics>,
-}
-
-#[derive(Serialize)]
-struct SessionListExport {
-    sessions: Vec<SessionSummaryExport>,
-}
-
-impl SessionListExport {
-    fn from_summaries(summaries: Vec<SessionSummary>) -> Self {
-        Self {
-            sessions: summaries
-                .into_iter()
-                .map(SessionSummaryExport::from)
-                .collect(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct SessionSummaryExport {
-    session_id: String,
-    status: String,
-    prompt: String,
-    domain: String,
-    updated_at: i64,
-}
-
-impl From<SessionSummary> for SessionSummaryExport {
-    fn from(value: SessionSummary) -> Self {
-        Self {
-            session_id: value.session_id,
-            status: value.status.as_str().to_string(),
-            prompt: value.prompt,
-            domain: value.domain,
-            updated_at: value.updated_at,
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct SessionDetailExport {
-    session_id: String,
-    status: String,
-    prompt: String,
-    domain: String,
-    updated_at: i64,
-    wait_state: Option<WaitState>,
-    metadata: SessionMetadata,
-    completed_steps: usize,
-    total_steps: usize,
-    metrics: WorkflowMetrics,
-}
-
-impl SessionDetailExport {
-    fn from_record(record: &SessionRecord) -> Self {
-        let context = &record.envelope.context;
-        Self {
-            session_id: context.session_id.clone(),
-            status: record.status.as_str().to_string(),
-            prompt: context.prompt.clone(),
-            domain: context.domain.clone(),
-            updated_at: record.updated_at,
-            wait_state: context.wait_state.clone(),
-            metadata: record.envelope.metadata.clone(),
-            completed_steps: completed_steps(context),
-            total_steps: context.steps.len(),
-            metrics: context.metrics.clone(),
-        }
-    }
 }
 
 #[cfg(test)]

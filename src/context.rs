@@ -1,7 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 
+use serde::{Deserialize, Serialize};
+
 /// Runtime context shared across microtasks.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
     pub session_id: String,
     pub prompt: String,
@@ -15,6 +17,8 @@ pub struct Context {
     pub root_step_id: Option<usize>,
     pub pending_decompositions: HashMap<usize, Vec<DecompositionProposal>>,
     pub pending_solutions: HashMap<usize, Vec<String>>,
+    pub work_queue: VecDeque<WorkItem>,
+    pub wait_state: Option<WaitState>,
 }
 
 impl Default for Context {
@@ -32,6 +36,8 @@ impl Default for Context {
             root_step_id: None,
             pending_decompositions: HashMap::new(),
             pending_solutions: HashMap::new(),
+            work_queue: VecDeque::new(),
+            wait_state: None,
         }
     }
 }
@@ -47,6 +53,7 @@ impl Context {
         let root = ctx.create_step(prompt_str, None, 0);
         ctx.root_step_id = Some(root);
         ctx.current_step = root;
+        ctx.enqueue_work(WorkItem::Decomposition { step_id: root });
         ctx
     }
 
@@ -142,6 +149,46 @@ impl Context {
         self.root_step_id
     }
 
+    pub fn dequeue_work(&mut self) -> Option<WorkItem> {
+        self.work_queue.pop_front()
+    }
+
+    pub fn enqueue_work(&mut self, item: WorkItem) {
+        self.work_queue.push_back(item);
+    }
+
+    pub fn enqueue_work_front(&mut self, item: WorkItem) {
+        self.work_queue.push_front(item);
+    }
+
+    pub fn has_pending_work(&self) -> bool {
+        !self.work_queue.is_empty()
+    }
+
+    pub fn clear_wait_state(&mut self) {
+        if let Some(wait) = self.wait_state.take() {
+            if let Some(step) = self.step_mut(wait.step_id) {
+                if matches!(step.status, StepStatus::WaitingOnInput) {
+                    step.status = StepStatus::Pending;
+                }
+            }
+        }
+    }
+
+    pub fn set_wait_state(
+        &mut self,
+        step_id: usize,
+        trigger: impl Into<String>,
+        details: impl Into<String>,
+    ) {
+        self.wait_state = Some(WaitState {
+            step_id,
+            trigger: trigger.into(),
+            details: details.into(),
+        });
+        self.mark_step_status(step_id, StepStatus::WaitingOnInput);
+    }
+
     fn create_step(&mut self, description: String, parent: Option<usize>, depth: usize) -> usize {
         let id = self.next_step_id;
         self.next_step_id += 1;
@@ -151,7 +198,7 @@ impl Context {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowStep {
     pub id: usize,
     pub description: String,
@@ -178,14 +225,16 @@ impl WorkflowStep {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepStatus {
     Pending,
     Running,
+    WaitingOnInput,
     Completed,
+    Failed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecompositionProposal {
     pub id: usize,
     pub raw: String,
@@ -198,7 +247,7 @@ impl DecompositionProposal {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct WorkflowMetrics {
     pub sample_count: usize,
     pub resample_count: usize,
@@ -213,6 +262,10 @@ pub struct WorkflowMetrics {
 impl WorkflowMetrics {
     pub fn step_metrics_mut(&mut self, step_id: usize) -> &mut StepMetrics {
         self.per_step.entry(step_id).or_default()
+    }
+
+    pub fn step_metrics(&self, step_id: usize) -> Option<&StepMetrics> {
+        self.per_step.get(&step_id)
     }
 
     pub fn record_samples(&mut self, step_id: usize, requested: usize, retained: usize) {
@@ -272,7 +325,7 @@ impl WorkflowMetrics {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentKind {
     Decomposition,
     DecompositionDiscriminator,
@@ -280,7 +333,7 @@ pub enum AgentKind {
     SolutionDiscriminator,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub kind: AgentKind,
     pub prompt_template: String,
@@ -289,7 +342,7 @@ pub struct AgentConfig {
     pub k: Option<usize>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct StepMetrics {
     pub samples_requested: usize,
     pub samples_retained: usize,
@@ -300,15 +353,41 @@ pub struct StepMetrics {
     pub verification_passed: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedFlagIncident {
     pub flagger: String,
     pub reason: String,
     pub sample_preview: String,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct VoteStats {
     pub recent_margins: VecDeque<usize>,
     pub total_votes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WorkItem {
+    Decomposition { step_id: usize },
+    DecompositionVote { step_id: usize },
+    Solve { step_id: usize },
+    SolutionVote { step_id: usize },
+}
+
+impl WorkItem {
+    pub fn step_id(&self) -> usize {
+        match *self {
+            WorkItem::Decomposition { step_id }
+            | WorkItem::DecompositionVote { step_id }
+            | WorkItem::Solve { step_id }
+            | WorkItem::SolutionVote { step_id } => step_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitState {
+    pub step_id: usize,
+    pub trigger: String,
+    pub details: String,
 }

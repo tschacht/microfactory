@@ -19,6 +19,8 @@ pub enum Commands {
     Status(StatusArgs),
     /// Resume a paused or failed workflow session.
     Resume(ResumeArgs),
+    /// Execute a single-step subprocess workflow and emit JSON.
+    Subprocess(SubprocessArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -83,6 +85,84 @@ pub struct StatusArgs {
 pub struct ResumeArgs {
     #[arg(long, help = "Session identifier to resume")]
     pub session_id: String,
+
+    #[arg(long, help = "Override config file path (defaults to stored path)")]
+    pub config: Option<PathBuf>,
+
+    #[arg(long, help = "Override LLM provider API key")]
+    pub api_key: Option<String>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Override LLM provider backend (defaults to stored provider)"
+    )]
+    pub llm_provider: Option<LlmProvider>,
+
+    #[arg(long, help = "Override model identifier (defaults to stored model)")]
+    pub llm_model: Option<String>,
+
+    #[arg(long, help = "Override max concurrent LLM calls")]
+    pub max_concurrent_llm: Option<usize>,
+
+    #[arg(long, help = "Override sample count")]
+    pub samples: Option<usize>,
+
+    #[arg(long, help = "Override voting k")]
+    pub k: Option<usize>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct SubprocessArgs {
+    #[arg(long, help = "Domain identifier (e.g., code)")]
+    pub domain: String,
+
+    #[arg(
+        long,
+        default_value = "config.yaml",
+        help = "Path to the domain configuration file"
+    )]
+    pub config: PathBuf,
+
+    #[arg(long, help = "Step description to execute in isolation")]
+    pub step: String,
+
+    #[arg(
+        long,
+        help = "Optional inline JSON blob to pass through domain context"
+    )]
+    pub context_json: Option<String>,
+
+    #[arg(long, help = "LLM provider API key (can also come from env vars)")]
+    pub api_key: Option<String>,
+
+    #[arg(
+        long,
+        default_value = "gpt-5.1-codex-mini",
+        help = "Model identifier for the subprocess run"
+    )]
+    pub llm_model: String,
+
+    #[arg(
+        long,
+        default_value_t = LlmProvider::Openai,
+        value_enum,
+        help = "LLM provider backend"
+    )]
+    pub llm_provider: LlmProvider,
+
+    #[arg(long, default_value_t = 2, help = "Samples per solver call")]
+    pub samples: usize,
+
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "First-to-ahead-by-k margin for subprocess voting"
+    )]
+    pub k: usize,
+
+    #[arg(long, default_value_t = 2, help = "Max concurrent LLM calls")]
+    pub max_concurrent_llm: usize,
 }
 
 /// Supported LLM providers surfaced via the CLI.
@@ -111,6 +191,25 @@ impl LlmProvider {
             LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
             LlmProvider::Gemini => "GEMINI_API_KEY",
             LlmProvider::Grok => "XAI_API_KEY",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmProvider::Openai => "openai",
+            LlmProvider::Anthropic => "anthropic",
+            LlmProvider::Gemini => "gemini",
+            LlmProvider::Grok => "grok",
+        }
+    }
+
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "openai" => Some(LlmProvider::Openai),
+            "anthropic" => Some(LlmProvider::Anthropic),
+            "gemini" => Some(LlmProvider::Gemini),
+            "grok" => Some(LlmProvider::Grok),
+            _ => None,
         }
     }
 }

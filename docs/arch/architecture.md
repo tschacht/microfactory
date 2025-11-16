@@ -302,6 +302,8 @@ This section describes a suggested implementation sequence assuming the work is 
 - Implement the `microfactory subprocess` subcommand described in the "Alternative: As an Agent Tool" section, using the same internal tasks and `FlowRunner` but constrained to a single step or small subgraph.
 - Add smoke tests for resuming a session, and for using `microfactory subprocess` in a simple pipeline.
 
+**Implementation Status (Nov 16, 2025):** Completed. `FlowRunner` now surfaces `NextAction::WaitForInput` as a first-class pause, with heuristics for red-flag streaks, excessive resamples, and tight vote margins automatically parking the session while recording a `WaitState`. The runtime context, pending work queue, and metrics are serialized (via `serde_json`) into a bundled `rusqlite` database under `~/.microfactory/sessions.sqlite3`, and the CLI’s `status`/`resume` subcommands inspect or restart those sessions (including API-key/provider overrides). New session metadata captures provider/model/option knobs so resumes reuse the same LLM backdrop by default. An additional `microfactory subprocess` command reuses the solver + discriminator stack for single-step workflows and emits JSON suitable for higher-level orchestrators. Unit tests cover the SQLite session store, CLI env-layer, and the existing scripted runner regression, and `cargo test` stays green.
+
 ### Phase 6: Hardening and Domain Expansion
 
 - Improve error messages, configuration validation, and logging for real-world use (e.g., missing templates, invalid YAML structures, unsupported domains).

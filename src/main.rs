@@ -4,15 +4,19 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as AnyhowContext, Result, anyhow};
 use clap::Parser;
+use serde::Serialize;
+use uuid::Uuid;
 
 use microfactory::{
-    cli::{Cli, Commands, LlmProvider, ResumeArgs, RunArgs, StatusArgs},
+    cli::{Cli, Commands, LlmProvider, ResumeArgs, RunArgs, StatusArgs, SubprocessArgs},
     config::MicrofactoryConfig,
-    context::Context,
+    context::{Context, StepMetrics, StepStatus, WorkItem},
     llm::{LlmClient, RigLlmClient},
-    runner::{FlowRunner, RunnerOptions},
+    paths::home_env_path,
+    persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
+    runner::{FlowRunner, RunnerOptions, RunnerOutcome},
 };
 
 static HOME_ENV_ONCE: OnceLock<()> = OnceLock::new();
@@ -24,6 +28,7 @@ async fn main() -> Result<()> {
         Commands::Run(args) => run_command(args).await?,
         Commands::Status(args) => status_command(args).await?,
         Commands::Resume(args) => resume_command(args).await?,
+        Commands::Subprocess(args) => subprocess_command(args).await?,
     }
     Ok(())
 }
@@ -32,9 +37,15 @@ async fn run_command(args: RunArgs) -> Result<()> {
     let config = Arc::new(load_config(&args.config)?);
     ensure_domain_exists(&config, &args.domain)?;
 
-    let llm_client: Arc<dyn LlmClient> = Arc::new(create_llm_client(&args)?);
+    let llm_client: Arc<dyn LlmClient> = Arc::new(create_llm_client(
+        args.llm_provider,
+        args.llm_model.clone(),
+        args.max_concurrent_llm,
+        resolve_api_key(args.api_key.clone(), args.llm_provider)?,
+    )?);
     let runner_options = RunnerOptions::from_cli(args.samples, args.k, args.adaptive_k);
     let mut context = Context::new(&args.prompt, &args.domain);
+    context.session_id = new_session_id();
     context.dry_run = args.dry_run;
 
     if args.dry_run {
@@ -42,25 +53,255 @@ async fn run_command(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
+    println!(
+        "Starting session {} (domain: {})",
+        context.session_id, context.domain
+    );
+
+    let metadata = SessionMetadata {
+        config_path: args.config.to_string_lossy().to_string(),
+        llm_provider: args.llm_provider.as_str().to_string(),
+        llm_model: args.llm_model.clone(),
+        max_concurrent_llm: args.max_concurrent_llm,
+        samples: args.samples,
+        k: args.k,
+        adaptive_k: args.adaptive_k,
+    };
+    let store = SessionStore::open(None)?;
+    let mut envelope = SessionEnvelope {
+        context: context.clone(),
+        metadata: metadata.clone(),
+    };
+    store.save(&envelope, SessionStatus::Running)?;
+
     let runner = FlowRunner::new(config, Some(llm_client), runner_options);
-    runner.execute(&mut context).await?;
+    match runner.execute(&mut context).await {
+        Ok(outcome) => {
+            envelope.context = context.clone();
+            let status = match &outcome {
+                RunnerOutcome::Completed => SessionStatus::Completed,
+                RunnerOutcome::Paused(wait) => {
+                    println!(
+                        "Session {} paused at step {} ({}) - {}",
+                        context.session_id, wait.step_id, wait.trigger, wait.details
+                    );
+                    SessionStatus::Paused
+                }
+            };
+            store.save(&envelope, status)?;
+            match outcome {
+                RunnerOutcome::Completed => {
+                    println!("Session {} completed successfully.", context.session_id);
+                }
+                RunnerOutcome::Paused(_) => {
+                    println!(
+                        "Use `microfactory resume --session-id {}` after resolving the issue.",
+                        context.session_id
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            envelope.context = context.clone();
+            store.save(&envelope, SessionStatus::Failed)?;
+            return Err(err);
+        }
+    }
+
     Ok(())
 }
 
 async fn status_command(args: StatusArgs) -> Result<()> {
-    let config = Arc::new(load_config(&default_config_path())?);
-    let runner = FlowRunner::new(config, None, RunnerOptions::default());
-    runner.status(args.session_id.as_deref())?;
+    let store = SessionStore::open(None)?;
+    if let Some(id) = args.session_id {
+        let record = store.load(&id)?;
+        println!("Session: {}", id);
+        println!("Status: {}", record.status.as_str());
+        println!("Prompt: {}", record.envelope.context.prompt);
+        println!("Domain: {}", record.envelope.context.domain);
+        println!("Updated: {}", record.updated_at);
+        if let Some(wait) = &record.envelope.context.wait_state {
+            println!(
+                "Waiting on step {} ({}) - {}",
+                wait.step_id, wait.trigger, wait.details
+            );
+        }
+        println!(
+            "Steps completed: {}",
+            completed_steps(&record.envelope.context)
+        );
+    } else {
+        let summaries = store.list(10)?;
+        if summaries.is_empty() {
+            println!("No sessions recorded yet.");
+        } else {
+            println!("Recent sessions:");
+            for summary in summaries {
+                println!(
+                    "- {} [{}] domain={} updated={} prompt={}",
+                    summary.session_id,
+                    summary.status.as_str(),
+                    summary.domain,
+                    summary.updated_at,
+                    summary.prompt
+                );
+            }
+        }
+    }
     Ok(())
 }
 
 async fn resume_command(args: ResumeArgs) -> Result<()> {
-    let config = Arc::new(load_config(&default_config_path())?);
-    let mut context = Context::default();
-    context.session_id = args.session_id;
+    let store = SessionStore::open(None)?;
+    let record = store.load(&args.session_id)?;
+    let mut context = record.envelope.context;
+    let prev_metadata = record.envelope.metadata;
 
-    let runner = FlowRunner::new(config, None, RunnerOptions::default());
-    runner.execute(&mut context).await?;
+    let provider = args
+        .llm_provider
+        .or_else(|| LlmProvider::from_name(prev_metadata.llm_provider.as_str()))
+        .ok_or_else(|| {
+            anyhow!(
+                "Session stored unsupported provider '{}'",
+                prev_metadata.llm_provider
+            )
+        })?;
+    let model = args
+        .llm_model
+        .unwrap_or_else(|| prev_metadata.llm_model.clone());
+    let max_concurrent = args
+        .max_concurrent_llm
+        .unwrap_or(prev_metadata.max_concurrent_llm);
+    let samples = args.samples.unwrap_or(prev_metadata.samples);
+    let k = args.k.unwrap_or(prev_metadata.k);
+    let adaptive = prev_metadata.adaptive_k;
+
+    let config_path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(prev_metadata.config_path.clone()));
+    let config = Arc::new(load_config(&config_path)?);
+    ensure_domain_exists(&config, &context.domain)?;
+
+    if let Some(wait) = &context.wait_state {
+        println!(
+            "Resuming session {} previously paused at step {} ({}) - {}",
+            context.session_id, wait.step_id, wait.trigger, wait.details
+        );
+    }
+    context.clear_wait_state();
+
+    let api_key = resolve_api_key(args.api_key.clone(), provider)?;
+    let llm_client: Arc<dyn LlmClient> = Arc::new(create_llm_client(
+        provider,
+        model.clone(),
+        max_concurrent,
+        api_key,
+    )?);
+    let runner_options = RunnerOptions::from_cli(samples, k, adaptive);
+
+    let metadata = SessionMetadata {
+        config_path: config_path.to_string_lossy().to_string(),
+        llm_provider: provider.as_str().to_string(),
+        llm_model: model.clone(),
+        max_concurrent_llm: max_concurrent,
+        samples,
+        k,
+        adaptive_k: adaptive,
+    };
+    let mut envelope = SessionEnvelope {
+        context: context.clone(),
+        metadata: metadata.clone(),
+    };
+    store.save(&envelope, SessionStatus::Running)?;
+
+    let runner = FlowRunner::new(config, Some(llm_client), runner_options);
+    match runner.execute(&mut context).await {
+        Ok(outcome) => {
+            envelope.context = context.clone();
+            let status = match &outcome {
+                RunnerOutcome::Completed => SessionStatus::Completed,
+                RunnerOutcome::Paused(wait) => {
+                    println!(
+                        "Session {} paused again at step {} ({}) - {}",
+                        context.session_id, wait.step_id, wait.trigger, wait.details
+                    );
+                    SessionStatus::Paused
+                }
+            };
+            store.save(&envelope, status)?;
+            match outcome {
+                RunnerOutcome::Completed => {
+                    println!("Session {} completed.", context.session_id);
+                }
+                RunnerOutcome::Paused(_) => {
+                    println!(
+                        "Use `microfactory resume --session-id {}` once resolved.",
+                        context.session_id
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            envelope.context = context.clone();
+            store.save(&envelope, SessionStatus::Failed)?;
+            return Err(err);
+        }
+    }
+
+    Ok(())
+}
+
+async fn subprocess_command(args: SubprocessArgs) -> Result<()> {
+    let config = Arc::new(load_config(&args.config)?);
+    ensure_domain_exists(&config, &args.domain)?;
+    let api_key = resolve_api_key(args.api_key.clone(), args.llm_provider)?;
+    let llm_client: Arc<dyn LlmClient> = Arc::new(create_llm_client(
+        args.llm_provider,
+        args.llm_model.clone(),
+        args.max_concurrent_llm,
+        api_key,
+    )?);
+
+    let mut context = Context::new(&args.step, &args.domain);
+    context.session_id = format!("subprocess-{}", new_session_id());
+    if let Some(extra) = &args.context_json {
+        context
+            .domain_data
+            .insert("context_json".into(), extra.clone());
+    }
+    let root_id = context.ensure_root();
+    context.work_queue.clear();
+    context.enqueue_work(WorkItem::Solve { step_id: root_id });
+    context.enqueue_work(WorkItem::SolutionVote { step_id: root_id });
+
+    let runner_options = RunnerOptions::from_cli(args.samples, args.k, false);
+    let runner = FlowRunner::new(config, Some(llm_client), runner_options);
+    match runner.execute(&mut context).await? {
+        RunnerOutcome::Completed => {
+            let step = context
+                .step(root_id)
+                .with_context(|| "Root step missing after subprocess run")?;
+            let metrics = context.metrics().step_metrics(root_id).cloned();
+            let output = SubprocessOutput {
+                session_id: context.session_id.clone(),
+                step_id: root_id,
+                candidate_solutions: step.candidate_solutions.clone(),
+                winning_solution: step.winning_solution.clone(),
+                metrics,
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        RunnerOutcome::Paused(wait) => {
+            return Err(anyhow!(
+                "Subprocess paused at step {} ({}) - {}",
+                wait.step_id,
+                wait.trigger,
+                wait.details
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -68,25 +309,20 @@ fn load_config(path: &PathBuf) -> Result<MicrofactoryConfig> {
     MicrofactoryConfig::from_path(path)
 }
 
-fn default_config_path() -> PathBuf {
-    PathBuf::from("config.yaml")
+fn create_llm_client(
+    provider: LlmProvider,
+    model: String,
+    max_concurrent: usize,
+    api_key: String,
+) -> Result<RigLlmClient> {
+    RigLlmClient::new(provider, api_key, model, max_concurrent)
 }
 
-fn create_llm_client(args: &RunArgs) -> Result<RigLlmClient> {
-    let api_key = resolve_api_key(args)?;
-    RigLlmClient::new(
-        args.llm_provider,
-        api_key,
-        args.llm_model.clone(),
-        args.max_concurrent_llm,
-    )
-}
-
-fn resolve_api_key(args: &RunArgs) -> Result<String> {
+fn resolve_api_key(cli_value: Option<String>, provider: LlmProvider) -> Result<String> {
     ensure_home_env_loaded();
-    let env_var = args.llm_provider.env_var();
+    let env_var = provider.env_var();
     let env_value = std::env::var(env_var).ok();
-    pick_api_key(args.api_key.clone(), env_value)
+    pick_api_key(cli_value, env_value)
         .map_err(|_| anyhow!("Missing API key: pass --api-key or set {}", env_var))
 }
 
@@ -98,9 +334,7 @@ fn pick_api_key(cli_value: Option<String>, env_value: Option<String>) -> Result<
         return Ok(key);
     }
 
-    Err(anyhow!(
-        "Missing API key: pass --api-key or set OPENAI_API_KEY"
-    ))
+    Err(anyhow!("Missing API key"))
 }
 
 fn normalize_key(value: Option<String>) -> Option<String> {
@@ -122,19 +356,6 @@ fn ensure_home_env_loaded() {
             }
         }
     });
-}
-
-fn home_env_path() -> Option<PathBuf> {
-    home_dir().map(|mut dir| {
-        dir.push(".env");
-        dir
-    })
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
 }
 
 fn apply_env_contents(contents: &str) {
@@ -187,6 +408,26 @@ async fn run_dry_run_probe(args: &RunArgs, llm: Arc<dyn LlmClient>) -> Result<()
     let response = llm.sample(&args.prompt, Some(&args.llm_model)).await?;
     println!("--- LLM Response Start ---\n{response}\n--- LLM Response End ---");
     Ok(())
+}
+
+fn new_session_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn completed_steps(ctx: &Context) -> usize {
+    ctx.steps
+        .iter()
+        .filter(|step| matches!(step.status, StepStatus::Completed))
+        .count()
+}
+
+#[derive(Serialize)]
+struct SubprocessOutput {
+    session_id: String,
+    step_id: usize,
+    candidate_solutions: Vec<String>,
+    winning_solution: Option<String>,
+    metrics: Option<StepMetrics>,
 }
 
 #[cfg(test)]

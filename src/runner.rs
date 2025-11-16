@@ -1,15 +1,11 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
-use petgraph::graph::Graph;
 use tracing::{debug, info};
 
 use crate::{
     config::{AgentDefinition, DomainConfig, MicrofactoryConfig},
-    context::{AgentConfig, AgentKind, Context, StepStatus},
+    context::{AgentConfig, AgentKind, Context, StepStatus, WaitState, WorkItem},
     llm::LlmClient,
     red_flaggers::RedFlagPipeline,
     tasks::{
@@ -38,7 +34,8 @@ impl FlowRunner {
         }
     }
 
-    pub async fn execute(&self, context: &mut Context) -> Result<()> {
+    /// Executes pending work items stored in the context until completion or a human-in-loop pause.
+    pub async fn execute(&self, context: &mut Context) -> Result<RunnerOutcome> {
         let llm = self
             .llm
             .clone()
@@ -53,20 +50,23 @@ impl FlowRunner {
             RedFlagPipeline::from_configs(&domain_cfg.red_flaggers)
                 .context("Failed to build red-flagger pipeline")?,
         );
-        let root_step = context.ensure_root();
 
-        let mut graph: Graph<TaskNodeKind, ()> = Graph::new();
-        let mut queue = VecDeque::new();
-        let root_idx = graph.add_node(TaskNodeKind::Decomposition { step_id: root_step });
-        queue.push_back(root_idx);
+        if context.root_step_id().is_none() {
+            let root = context.ensure_root();
+            context.enqueue_work(WorkItem::Decomposition { step_id: root });
+        }
 
-        while let Some(idx) = queue.pop_front() {
-            let node_kind = *graph
-                .node_weight(idx)
-                .expect("Workflow node missing during traversal");
-            match node_kind {
-                TaskNodeKind::Decomposition { step_id } => {
-                    let step_desc = context
+        if !context.has_pending_work() {
+            if let Some(root) = context.root_step_id() {
+                context.enqueue_work(WorkItem::Decomposition { step_id: root });
+            }
+        }
+
+        while let Some(item) = context.dequeue_work() {
+            let current_item = item.clone();
+            match item {
+                WorkItem::Decomposition { step_id } => {
+                    let step_prompt = context
                         .step(step_id)
                         .map(|s| s.description.clone())
                         .unwrap_or_else(|| context.prompt.clone());
@@ -76,18 +76,25 @@ impl FlowRunner {
                         .clone();
                     let task = DecompositionTask::new(
                         step_id,
-                        step_desc,
+                        step_prompt,
                         agent,
                         llm.clone(),
                         red_flag_pipeline.clone(),
                     );
                     let result = task.run(context).await?;
-                    Self::ensure_continue(result.action)?;
-                    let vote_idx = graph.add_node(TaskNodeKind::DecompositionVote { step_id });
-                    graph.add_edge(idx, vote_idx, ());
-                    queue.push_back(vote_idx);
+                    if let Some(outcome) =
+                        self.handle_next_action(result.action, &current_item, context)
+                    {
+                        return Ok(outcome);
+                    }
+                    if let Some(wait) =
+                        self.check_sampling_triggers(context, step_id, "decomposition sampling")
+                    {
+                        return Ok(self.pause_with(context, wait, current_item));
+                    }
+                    context.enqueue_work_front(WorkItem::DecompositionVote { step_id });
                 }
-                TaskNodeKind::DecompositionVote { step_id } => {
+                WorkItem::DecompositionVote { step_id } => {
                     let agent = agent_configs
                         .get(&AgentKind::DecompositionDiscriminator)
                         .expect("missing decomposition discriminator")
@@ -96,27 +103,37 @@ impl FlowRunner {
                         self.resolve_k(AgentKind::DecompositionDiscriminator, &agent, context);
                     let task = DecompositionVoteTask::new(step_id, agent, llm.clone(), vote_k);
                     let result = task.run(context).await?;
-                    Self::ensure_continue(result.action)?;
+                    if let Some(outcome) =
+                        self.handle_next_action(result.action, &current_item, context)
+                    {
+                        return Ok(outcome);
+                    }
+                    if let Some(wait) =
+                        self.check_vote_triggers(context, step_id, "decomposition vote")
+                    {
+                        return Ok(self.pause_with(
+                            context,
+                            wait,
+                            WorkItem::Decomposition { step_id },
+                        ));
+                    }
+
                     if let TaskEffect::SpawnedSteps(children) = result.effect {
                         if children.is_empty() {
-                            let solve_idx = graph.add_node(TaskNodeKind::Solve { step_id });
-                            graph.add_edge(idx, solve_idx, ());
-                            queue.push_back(solve_idx);
+                            context.enqueue_work(WorkItem::Solve { step_id });
                         } else {
                             for child in children {
-                                let kind = if self.should_recurse(context, child) {
-                                    TaskNodeKind::Decomposition { step_id: child }
+                                let next = if self.should_recurse(context, child) {
+                                    WorkItem::Decomposition { step_id: child }
                                 } else {
-                                    TaskNodeKind::Solve { step_id: child }
+                                    WorkItem::Solve { step_id: child }
                                 };
-                                let child_idx = graph.add_node(kind);
-                                graph.add_edge(idx, child_idx, ());
-                                queue.push_back(child_idx);
+                                context.enqueue_work(next);
                             }
                         }
                     }
                 }
-                TaskNodeKind::Solve { step_id } => {
+                WorkItem::Solve { step_id } => {
                     let agent = agent_configs
                         .get(&AgentKind::Solver)
                         .expect("missing solver agent")
@@ -124,14 +141,21 @@ impl FlowRunner {
                     let task =
                         SolveTask::new(step_id, agent, llm.clone(), red_flag_pipeline.clone());
                     let result = task.run(context).await?;
-                    Self::ensure_continue(result.action)?;
+                    if let Some(outcome) =
+                        self.handle_next_action(result.action, &current_item, context)
+                    {
+                        return Ok(outcome);
+                    }
+                    if let Some(wait) =
+                        self.check_sampling_triggers(context, step_id, "solver sampling")
+                    {
+                        return Ok(self.pause_with(context, wait, current_item));
+                    }
                     if matches!(result.effect, TaskEffect::SolutionsReady { .. }) {
-                        let vote_idx = graph.add_node(TaskNodeKind::SolutionVote { step_id });
-                        graph.add_edge(idx, vote_idx, ());
-                        queue.push_back(vote_idx);
+                        context.enqueue_work_front(WorkItem::SolutionVote { step_id });
                     }
                 }
-                TaskNodeKind::SolutionVote { step_id } => {
+                WorkItem::SolutionVote { step_id } => {
                     let agent = agent_configs
                         .get(&AgentKind::SolutionDiscriminator)
                         .expect("missing solution discriminator")
@@ -139,7 +163,15 @@ impl FlowRunner {
                     let vote_k = self.resolve_k(AgentKind::SolutionDiscriminator, &agent, context);
                     let task = SolutionVoteTask::new(step_id, agent, llm.clone(), vote_k);
                     let result = task.run(context).await?;
-                    Self::ensure_continue(result.action)?;
+                    if let Some(outcome) =
+                        self.handle_next_action(result.action, &current_item, context)
+                    {
+                        return Ok(outcome);
+                    }
+                    if let Some(wait) = self.check_vote_triggers(context, step_id, "solution vote")
+                    {
+                        return Ok(self.pause_with(context, wait, WorkItem::Solve { step_id }));
+                    }
                     if let TaskEffect::StepCompleted { step_id } = result.effect {
                         if let Some(step) = context.step(step_id) {
                             info!(step_id, %step.description, "Step completed");
@@ -159,16 +191,48 @@ impl FlowRunner {
             total = context.steps.len(),
             "FlowRunner execution complete"
         );
-        Ok(())
+        Ok(RunnerOutcome::Completed)
     }
 
-    pub fn status(&self, session_id: Option<&str>) -> Result<()> {
-        if let Some(id) = session_id {
-            info!(session_id = id, "Status inspection placeholder");
-        } else {
-            info!("Listing recent sessions (placeholder)");
+    fn pause_with(
+        &self,
+        context: &mut Context,
+        wait: WaitState,
+        retry_item: WorkItem,
+    ) -> RunnerOutcome {
+        context.enqueue_work_front(retry_item);
+        context.set_wait_state(wait.step_id, wait.trigger.clone(), wait.details.clone());
+        RunnerOutcome::Paused(
+            context
+                .wait_state
+                .clone()
+                .expect("wait state recorded during pause"),
+        )
+    }
+
+    fn handle_next_action(
+        &self,
+        action: NextAction,
+        current_item: &WorkItem,
+        context: &mut Context,
+    ) -> Option<RunnerOutcome> {
+        match action {
+            NextAction::Continue | NextAction::End => None,
+            NextAction::WaitForInput => {
+                let wait = WaitState {
+                    step_id: current_item.step_id(),
+                    trigger: "task_requested_input".into(),
+                    details: "Task requested human approval before continuing".into(),
+                };
+                Some(self.pause_with(context, wait, current_item.clone()))
+            }
+            NextAction::GoTo(_) => {
+                panic!("GoTo transitions are not supported in this phase");
+            }
+            NextAction::Error(msg) => {
+                panic!("Task reported error: {msg}");
+            }
         }
-        Ok(())
     }
 
     fn should_recurse(&self, context: &Context, step_id: usize) -> bool {
@@ -180,16 +244,6 @@ impl FlowRunner {
             return word_count >= self.options.min_words_for_decomposition;
         }
         false
-    }
-
-    fn ensure_continue(action: NextAction) -> Result<()> {
-        match action {
-            NextAction::Continue => Ok(()),
-            NextAction::End => Ok(()),
-            NextAction::WaitForInput => Err(anyhow!("WaitForInput not supported in Phase 3")),
-            NextAction::GoTo(_) => Err(anyhow!("GoTo transitions not implemented yet")),
-            NextAction::Error(msg) => Err(anyhow!("Task reported error: {msg}")),
-        }
     }
 
     fn resolve_k(&self, agent_kind: AgentKind, agent: &AgentConfig, context: &Context) -> usize {
@@ -222,6 +276,65 @@ impl FlowRunner {
         }
 
         base
+    }
+
+    fn check_sampling_triggers(
+        &self,
+        context: &Context,
+        step_id: usize,
+        stage: &str,
+    ) -> Option<WaitState> {
+        let metrics = context.metrics().step_metrics(step_id)?;
+        if self.options.human_red_flag_threshold > 0
+            && metrics.red_flags.len() >= self.options.human_red_flag_threshold
+        {
+            return Some(WaitState {
+                step_id,
+                trigger: format!("{stage}_red_flags"),
+                details: format!(
+                    "{} samples were red-flagged during {}",
+                    metrics.red_flags.len(),
+                    stage
+                ),
+            });
+        }
+        if self.options.human_resample_threshold > 0
+            && metrics.resamples >= self.options.human_resample_threshold
+        {
+            return Some(WaitState {
+                step_id,
+                trigger: format!("{stage}_resamples"),
+                details: format!(
+                    "{} resample attempts exceeded the allowed budget during {}",
+                    metrics.resamples, stage
+                ),
+            });
+        }
+        None
+    }
+
+    fn check_vote_triggers(
+        &self,
+        context: &Context,
+        step_id: usize,
+        stage: &str,
+    ) -> Option<WaitState> {
+        let metrics = context.metrics().step_metrics(step_id)?;
+        if self.options.human_low_margin_threshold > 0 {
+            if let Some(margin) = metrics.vote_margin {
+                if margin <= self.options.human_low_margin_threshold {
+                    return Some(WaitState {
+                        step_id,
+                        trigger: format!("{stage}_low_margin"),
+                        details: format!(
+                            "Vote margin ({}) during {} fell below threshold",
+                            margin, stage
+                        ),
+                    });
+                }
+            }
+        }
+        None
     }
 
     fn agent_configs(&self, domain: &DomainConfig) -> HashMap<AgentKind, AgentConfig> {
@@ -265,21 +378,22 @@ impl FlowRunner {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum TaskNodeKind {
-    Decomposition { step_id: usize },
-    DecompositionVote { step_id: usize },
-    Solve { step_id: usize },
-    SolutionVote { step_id: usize },
+#[derive(Debug, Clone)]
+pub enum RunnerOutcome {
+    Completed,
+    Paused(WaitState),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct RunnerOptions {
     pub default_samples: usize,
     pub default_k: usize,
     pub adaptive_k: bool,
     pub max_decomposition_depth: usize,
     pub min_words_for_decomposition: usize,
+    pub human_red_flag_threshold: usize,
+    pub human_resample_threshold: usize,
+    pub human_low_margin_threshold: usize,
 }
 
 impl RunnerOptions {
@@ -290,6 +404,9 @@ impl RunnerOptions {
             adaptive_k,
             max_decomposition_depth: 2,
             min_words_for_decomposition: 8,
+            human_red_flag_threshold: 4,
+            human_resample_threshold: 4,
+            human_low_margin_threshold: 1,
         }
     }
 }
@@ -302,6 +419,9 @@ impl Default for RunnerOptions {
             adaptive_k: false,
             max_decomposition_depth: 2,
             min_words_for_decomposition: 8,
+            human_red_flag_threshold: 4,
+            human_resample_threshold: 4,
+            human_low_margin_threshold: 1,
         }
     }
 }
@@ -394,11 +514,15 @@ mod tests {
             adaptive_k: false,
             max_decomposition_depth: 1,
             min_words_for_decomposition: 3,
+            human_red_flag_threshold: 5,
+            human_resample_threshold: 5,
+            human_low_margin_threshold: 1,
         };
 
         let runner = FlowRunner::new(config, Some(llm), options);
         let mut context = Context::new("Fix the bug", "code");
-        runner.execute(&mut context).await.unwrap();
+        let outcome = runner.execute(&mut context).await.unwrap();
+        assert!(matches!(outcome, RunnerOutcome::Completed));
 
         let completed = context
             .steps

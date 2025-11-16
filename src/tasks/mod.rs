@@ -1,11 +1,15 @@
-use std::{collections::HashMap, fmt::Write as _, sync::Arc};
+use std::{collections::HashMap, fmt::Write as _, sync::Arc, time::Instant};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use async_trait::async_trait;
+use tracing::{debug, warn};
 
 use crate::{
-    context::{AgentConfig, Context, DecompositionProposal, StepStatus},
+    context::{
+        AgentConfig, AgentKind, Context, DecompositionProposal, RedFlagIncident, StepStatus,
+    },
     llm::LlmClient,
+    red_flaggers::{RedFlagMatch, RedFlagPipeline},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +60,7 @@ pub struct DecompositionTask {
     prompt: String,
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
+    red_flags: Arc<RedFlagPipeline>,
 }
 
 impl DecompositionTask {
@@ -64,12 +69,14 @@ impl DecompositionTask {
         prompt: String,
         agent: AgentConfig,
         llm: Arc<dyn LlmClient>,
+        red_flags: Arc<RedFlagPipeline>,
     ) -> Self {
         Self {
             step_id,
             prompt,
             agent,
             llm,
+            red_flags,
         }
     }
 }
@@ -77,14 +84,22 @@ impl DecompositionTask {
 #[async_trait]
 impl MicroTask for DecompositionTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
+        let start = Instant::now();
         let samples = self.agent.samples.max(1);
         let rendered_prompt =
             render_prompt(&self.agent.prompt_template, &self.prompt, "decomposition");
         ctx.mark_step_status(self.step_id, StepStatus::Running);
-        let responses = self
-            .llm
-            .sample_n(&rendered_prompt, samples, Some(self.agent.model.as_str()))
-            .await?;
+        let responses = collect_samples_with_red_flags(
+            ctx,
+            self.step_id,
+            self.llm.clone(),
+            rendered_prompt,
+            samples,
+            &self.agent.model,
+            self.red_flags.clone(),
+            "decomposition",
+        )
+        .await?;
 
         let proposals = responses
             .into_iter()
@@ -102,7 +117,16 @@ impl MicroTask for DecompositionTask {
             return Err(anyhow!("LLM returned no decomposition proposals"));
         }
 
+        ctx.metrics
+            .record_duration_ms(self.step_id, start.elapsed().as_millis());
         ctx.register_decomposition(self.step_id, proposals);
+        if let Some(step) = ctx.step(self.step_id) {
+            debug!(
+                step_id = self.step_id,
+                depth = step.depth,
+                "Decomposition proposals ready"
+            );
+        }
         Ok(TaskResult::continue_with(TaskEffect::None))
     }
 }
@@ -111,21 +135,16 @@ pub struct DecompositionVoteTask {
     step_id: usize,
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
-    default_k: usize,
+    vote_k: usize,
 }
 
 impl DecompositionVoteTask {
-    pub fn new(
-        step_id: usize,
-        agent: AgentConfig,
-        llm: Arc<dyn LlmClient>,
-        default_k: usize,
-    ) -> Self {
+    pub fn new(step_id: usize, agent: AgentConfig, llm: Arc<dyn LlmClient>, vote_k: usize) -> Self {
         Self {
             step_id,
             agent,
             llm,
-            default_k,
+            vote_k,
         }
     }
 }
@@ -133,6 +152,7 @@ impl DecompositionVoteTask {
 #[async_trait]
 impl MicroTask for DecompositionVoteTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
+        let start = Instant::now();
         let proposals = ctx
             .take_decomposition(self.step_id)
             .with_context(|| format!("No proposals available for step {}", self.step_id))?;
@@ -160,17 +180,35 @@ impl MicroTask for DecompositionVoteTask {
             }
         }
 
-        let k = self.agent.k.unwrap_or(self.default_k).max(1);
+        let k = self.vote_k.max(1);
         let winner_idx = first_to_ahead_by_k(&votes, k)
             .or_else(|| majority_vote(&votes))
             .unwrap_or(0)
             .min(proposals.len() - 1);
+        let (winner_votes, runner_up_votes) = vote_counts(&votes, proposals.len(), winner_idx);
+        ctx.metrics.record_vote(
+            self.step_id,
+            AgentKind::DecompositionDiscriminator,
+            winner_votes,
+            runner_up_votes,
+        );
+        ctx.metrics
+            .record_duration_ms(self.step_id, start.elapsed().as_millis());
         let winner = proposals[winner_idx].clone();
         let mut new_steps = Vec::new();
         for subtask in winner.subtasks.iter() {
             let child_id = ctx.add_child_step(self.step_id, subtask.clone());
             new_steps.push(child_id);
         }
+
+        debug!(
+            step_id = self.step_id,
+            winner_idx,
+            winner_votes,
+            runner_up_votes,
+            vote_k = k,
+            "Decomposition vote completed"
+        );
 
         Ok(TaskResult::continue_with(TaskEffect::SpawnedSteps(
             new_steps,
@@ -182,14 +220,21 @@ pub struct SolveTask {
     step_id: usize,
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
+    red_flags: Arc<RedFlagPipeline>,
 }
 
 impl SolveTask {
-    pub fn new(step_id: usize, agent: AgentConfig, llm: Arc<dyn LlmClient>) -> Self {
+    pub fn new(
+        step_id: usize,
+        agent: AgentConfig,
+        llm: Arc<dyn LlmClient>,
+        red_flags: Arc<RedFlagPipeline>,
+    ) -> Self {
         Self {
             step_id,
             agent,
             llm,
+            red_flags,
         }
     }
 }
@@ -197,19 +242,33 @@ impl SolveTask {
 #[async_trait]
 impl MicroTask for SolveTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
+        let start = Instant::now();
         let step = ctx
             .step(self.step_id)
             .with_context(|| format!("Unknown step {}", self.step_id))?;
         let prompt = render_prompt(&self.agent.prompt_template, &step.description, "solve");
         let samples = self.agent.samples.max(1);
-        let responses = self
-            .llm
-            .sample_n(&prompt, samples, Some(self.agent.model.as_str()))
-            .await?;
+        let responses = collect_samples_with_red_flags(
+            ctx,
+            self.step_id,
+            self.llm.clone(),
+            prompt,
+            samples,
+            &self.agent.model,
+            self.red_flags.clone(),
+            "solve",
+        )
+        .await?;
         if responses.is_empty() {
             return Err(anyhow!("Solver agent produced no candidates"));
         }
+        ctx.metrics
+            .record_duration_ms(self.step_id, start.elapsed().as_millis());
         ctx.register_solutions(self.step_id, responses);
+        debug!(
+            step_id = self.step_id,
+            "Solver produced candidate solutions"
+        );
         Ok(TaskResult::continue_with(TaskEffect::SolutionsReady {
             step_id: self.step_id,
         }))
@@ -220,21 +279,16 @@ pub struct SolutionVoteTask {
     step_id: usize,
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
-    default_k: usize,
+    vote_k: usize,
 }
 
 impl SolutionVoteTask {
-    pub fn new(
-        step_id: usize,
-        agent: AgentConfig,
-        llm: Arc<dyn LlmClient>,
-        default_k: usize,
-    ) -> Self {
+    pub fn new(step_id: usize, agent: AgentConfig, llm: Arc<dyn LlmClient>, vote_k: usize) -> Self {
         Self {
             step_id,
             agent,
             llm,
-            default_k,
+            vote_k,
         }
     }
 }
@@ -242,6 +296,7 @@ impl SolutionVoteTask {
 #[async_trait]
 impl MicroTask for SolutionVoteTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
+        let start = Instant::now();
         let solutions = ctx
             .take_solutions(self.step_id)
             .with_context(|| format!("No solutions queued for step {}", self.step_id))?;
@@ -258,13 +313,31 @@ impl MicroTask for SolutionVoteTask {
                 votes.push(choice);
             }
         }
-        let k = self.agent.k.unwrap_or(self.default_k).max(1);
+        let k = self.vote_k.max(1);
         let winner_idx = first_to_ahead_by_k(&votes, k)
             .or_else(|| majority_vote(&votes))
             .unwrap_or(0)
             .min(solutions.len() - 1);
+        let (winner_votes, runner_up_votes) = vote_counts(&votes, solutions.len(), winner_idx);
+        ctx.metrics.record_vote(
+            self.step_id,
+            AgentKind::SolutionDiscriminator,
+            winner_votes,
+            runner_up_votes,
+        );
+        ctx.metrics
+            .record_duration_ms(self.step_id, start.elapsed().as_millis());
         let winner = solutions[winner_idx].clone();
         ctx.mark_step_solution(self.step_id, winner);
+        ctx.step_metrics_mut(self.step_id).verification_passed = Some(true);
+        debug!(
+            step_id = self.step_id,
+            winner_idx,
+            winner_votes,
+            runner_up_votes,
+            vote_k = k,
+            "Solution vote completed"
+        );
         Ok(TaskResult::continue_with(TaskEffect::StepCompleted {
             step_id: self.step_id,
         }))
@@ -329,6 +402,142 @@ fn enumerate_options(options: Vec<String>) -> String {
     body
 }
 
+fn vote_counts(votes: &[usize], candidate_count: usize, winner_idx: usize) -> (usize, usize) {
+    if candidate_count == 0 {
+        return (0, 0);
+    }
+    let mut counts = vec![0usize; candidate_count];
+    for &vote in votes {
+        if vote < candidate_count {
+            counts[vote] += 1;
+        }
+    }
+    let winner = counts.get(winner_idx).copied().unwrap_or(0);
+    let mut runner_up = 0;
+    for (idx, count) in counts.iter().enumerate() {
+        if idx == winner_idx {
+            continue;
+        }
+        if *count > runner_up {
+            runner_up = *count;
+        }
+    }
+    (winner, runner_up)
+}
+
+async fn collect_samples_with_red_flags(
+    ctx: &mut Context,
+    step_id: usize,
+    llm: Arc<dyn LlmClient>,
+    prompt: String,
+    target_samples: usize,
+    model: &str,
+    pipeline: Arc<RedFlagPipeline>,
+    stage: &'static str,
+) -> Result<Vec<String>> {
+    if target_samples == 0 {
+        return Ok(Vec::new());
+    }
+
+    if pipeline.is_empty() {
+        let responses = llm.sample_n(&prompt, target_samples, Some(model)).await?;
+        ctx.metrics
+            .record_samples(step_id, responses.len(), responses.len());
+        debug!(
+            step_id,
+            stage,
+            collected = responses.len(),
+            "Collected samples (no red flags)"
+        );
+        return Ok(responses);
+    }
+
+    let mut accepted = Vec::new();
+    let mut attempts = 0usize;
+    let max_attempts = target_samples.max(1) * 4;
+    while accepted.len() < target_samples {
+        attempts += 1;
+        let remaining = target_samples - accepted.len();
+        let batch = llm.sample_n(&prompt, remaining, Some(model)).await?;
+        let batch_len = batch.len();
+        let before = accepted.len();
+        let mut flagged_this_round = 0usize;
+        for raw in batch {
+            let matches = pipeline.evaluate(&raw);
+            if matches.is_empty() {
+                accepted.push(raw);
+            } else {
+                flagged_this_round += 1;
+                let incidents = matches_to_incidents(matches, &raw);
+                if let Some(first) = incidents.first() {
+                    warn!(
+                        step_id,
+                        stage,
+                        flagger = %first.flagger,
+                        reason = %first.reason,
+                        "Red-flagged sample discarded"
+                    );
+                }
+                ctx.metrics.record_red_flags(step_id, incidents);
+            }
+        }
+        let accepted_delta = accepted.len() - before;
+        ctx.metrics
+            .record_samples(step_id, batch_len, accepted_delta);
+        if accepted.len() < target_samples {
+            ctx.metrics.record_resample(step_id);
+            if attempts >= max_attempts {
+                return Err(anyhow!(
+                    "Exceeded red-flag resample budget for step {} during {}",
+                    step_id,
+                    stage
+                ));
+            }
+        }
+        if flagged_this_round > 0 {
+            warn!(
+                step_id,
+                stage,
+                flagged = flagged_this_round,
+                accepted_delta,
+                "Flagged samples in batch"
+            );
+        }
+    }
+
+    debug!(
+        step_id,
+        stage,
+        accepted = accepted.len(),
+        attempts,
+        "Collected samples with guardrails"
+    );
+    Ok(accepted)
+}
+
+fn matches_to_incidents(matches: Vec<RedFlagMatch>, sample: &str) -> Vec<RedFlagIncident> {
+    let preview = preview_sample(sample);
+    matches
+        .into_iter()
+        .map(|m| RedFlagIncident {
+            flagger: m.flagger,
+            reason: m.reason,
+            sample_preview: preview.clone(),
+        })
+        .collect()
+}
+
+fn preview_sample(text: &str) -> String {
+    let trimmed = text.trim();
+    const LIMIT: usize = 160;
+    if trimmed.chars().count() > LIMIT {
+        let preview: String = trimmed.chars().take(LIMIT).collect();
+        format!("{preview}…")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn first_to_ahead_by_k(votes: &[usize], k: usize) -> Option<usize> {
     if votes.is_empty() {
         return None;
@@ -375,6 +584,10 @@ fn majority_vote(votes: &[usize]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{config::RedFlaggerConfig, context::Context, red_flaggers::RedFlagPipeline};
+    use async_trait::async_trait;
+    use serde_yaml::Value;
+    use std::{collections::BTreeMap, sync::Mutex};
 
     #[test]
     fn parses_subtasks_from_bullets() {
@@ -400,5 +613,63 @@ mod tests {
     fn majority_vote_falls_back() {
         let votes = vec![1, 2, 2, 1, 2];
         assert_eq!(majority_vote(&votes), Some(2));
+    }
+
+    #[tokio::test]
+    async fn red_flags_trigger_resample() {
+        struct ScriptedLlm {
+            batches: Mutex<Vec<Vec<String>>>,
+        }
+
+        impl ScriptedLlm {
+            fn new(batches: Vec<Vec<String>>) -> Self {
+                Self {
+                    batches: Mutex::new(batches),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl LlmClient for ScriptedLlm {
+            async fn sample(&self, _: &str, _: Option<&str>) -> Result<String> {
+                let mut values = self.sample_n("", 1, None).await?;
+                Ok(values.remove(0))
+            }
+
+            async fn sample_n(&self, _: &str, n: usize, _: Option<&str>) -> Result<Vec<String>> {
+                let mut guard = self.batches.lock().unwrap();
+                let batch = guard.remove(0);
+                assert_eq!(batch.len(), n);
+                Ok(batch)
+            }
+        }
+
+        let configs = vec![RedFlaggerConfig {
+            kind: "length".into(),
+            params: BTreeMap::from([(String::from("max_tokens"), Value::from(2))]),
+        }];
+        let pipeline = Arc::new(RedFlagPipeline::from_configs(&configs).unwrap());
+        let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
+            vec!["one two three".into()],
+            vec!["one two".into()],
+        ]));
+        let mut ctx = Context::new("demo", "code");
+        let root_id = ctx.ensure_root();
+        let responses = collect_samples_with_red_flags(
+            &mut ctx,
+            root_id,
+            llm,
+            "prompt".to_string(),
+            1,
+            "model",
+            pipeline,
+            "test",
+        )
+        .await
+        .expect("collected sample");
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(ctx.metrics.red_flag_hits, 1);
+        assert!(ctx.metrics.resample_count >= 1);
     }
 }

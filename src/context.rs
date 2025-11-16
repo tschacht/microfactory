@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Runtime context shared across microtasks.
 #[derive(Debug)]
@@ -86,6 +86,18 @@ impl Context {
 
     pub fn step_mut(&mut self, step_id: usize) -> Option<&mut WorkflowStep> {
         self.steps.iter_mut().find(|step| step.id == step_id)
+    }
+
+    pub fn step_metrics_mut(&mut self, step_id: usize) -> &mut StepMetrics {
+        self.metrics.step_metrics_mut(step_id)
+    }
+
+    pub fn metrics(&self) -> &WorkflowMetrics {
+        &self.metrics
+    }
+
+    pub fn metrics_mut(&mut self) -> &mut WorkflowMetrics {
+        &mut self.metrics
     }
 
     pub fn register_decomposition(
@@ -193,6 +205,71 @@ pub struct WorkflowMetrics {
     pub vote_attempts: usize,
     pub decomposition_runs: usize,
     pub solve_runs: usize,
+    pub red_flag_hits: usize,
+    pub per_step: HashMap<usize, StepMetrics>,
+    pub vote_history: HashMap<AgentKind, VoteStats>,
+}
+
+impl WorkflowMetrics {
+    pub fn step_metrics_mut(&mut self, step_id: usize) -> &mut StepMetrics {
+        self.per_step.entry(step_id).or_default()
+    }
+
+    pub fn record_samples(&mut self, step_id: usize, requested: usize, retained: usize) {
+        self.sample_count += requested;
+        let metrics = self.step_metrics_mut(step_id);
+        metrics.samples_requested += requested;
+        metrics.samples_retained += retained;
+    }
+
+    pub fn record_resample(&mut self, step_id: usize) {
+        self.resample_count += 1;
+        self.step_metrics_mut(step_id).resamples += 1;
+    }
+
+    pub fn record_red_flags(
+        &mut self,
+        step_id: usize,
+        incidents: impl IntoIterator<Item = RedFlagIncident>,
+    ) {
+        let mut added = 0usize;
+        {
+            let metrics = self.step_metrics_mut(step_id);
+            for incident in incidents {
+                metrics.red_flags.push(incident);
+                added += 1;
+            }
+        }
+        self.red_flag_hits += added;
+    }
+
+    pub fn record_vote(
+        &mut self,
+        step_id: usize,
+        agent_kind: AgentKind,
+        winner_count: usize,
+        runner_up_count: usize,
+    ) {
+        self.vote_attempts += 1;
+        let margin = winner_count.saturating_sub(runner_up_count).max(1);
+        self.step_metrics_mut(step_id).vote_margin = Some(margin);
+        let stats = self.vote_history.entry(agent_kind).or_default();
+        stats.total_votes += 1;
+        if stats.recent_margins.len() >= 8 {
+            stats.recent_margins.pop_front();
+        }
+        stats.recent_margins.push_back(margin);
+    }
+
+    pub fn record_duration_ms(&mut self, step_id: usize, duration_ms: u128) {
+        let metrics = self.step_metrics_mut(step_id);
+        let accumulated = metrics.duration_ms.unwrap_or(0) + duration_ms;
+        metrics.duration_ms = Some(accumulated);
+    }
+
+    pub fn vote_stats(&self, agent_kind: AgentKind) -> Option<&VoteStats> {
+        self.vote_history.get(&agent_kind)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -210,4 +287,28 @@ pub struct AgentConfig {
     pub model: String,
     pub samples: usize,
     pub k: Option<usize>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct StepMetrics {
+    pub samples_requested: usize,
+    pub samples_retained: usize,
+    pub resamples: usize,
+    pub red_flags: Vec<RedFlagIncident>,
+    pub vote_margin: Option<usize>,
+    pub duration_ms: Option<u128>,
+    pub verification_passed: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RedFlagIncident {
+    pub flagger: String,
+    pub reason: String,
+    pub sample_preview: String,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct VoteStats {
+    pub recent_margins: VecDeque<usize>,
+    pub total_votes: usize,
 }

@@ -5,12 +5,13 @@ use std::{
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use petgraph::graph::Graph;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     config::{AgentDefinition, DomainConfig, MicrofactoryConfig},
     context::{AgentConfig, AgentKind, Context, StepStatus},
     llm::LlmClient,
+    red_flaggers::RedFlagPipeline,
     tasks::{
         DecompositionTask, DecompositionVoteTask, MicroTask, NextAction, SolutionVoteTask,
         SolveTask, TaskEffect,
@@ -48,6 +49,10 @@ impl FlowRunner {
             .domain(&context.domain)
             .with_context(|| format!("Unknown domain: {}", context.domain))?;
         let agent_configs = self.agent_configs(domain_cfg);
+        let red_flag_pipeline = Arc::new(
+            RedFlagPipeline::from_configs(&domain_cfg.red_flaggers)
+                .context("Failed to build red-flagger pipeline")?,
+        );
         let root_step = context.ensure_root();
 
         let mut graph: Graph<TaskNodeKind, ()> = Graph::new();
@@ -69,7 +74,13 @@ impl FlowRunner {
                         .get(&AgentKind::Decomposition)
                         .expect("missing decomposition agent")
                         .clone();
-                    let task = DecompositionTask::new(step_id, step_desc, agent, llm.clone());
+                    let task = DecompositionTask::new(
+                        step_id,
+                        step_desc,
+                        agent,
+                        llm.clone(),
+                        red_flag_pipeline.clone(),
+                    );
                     let result = task.run(context).await?;
                     Self::ensure_continue(result.action)?;
                     let vote_idx = graph.add_node(TaskNodeKind::DecompositionVote { step_id });
@@ -81,12 +92,9 @@ impl FlowRunner {
                         .get(&AgentKind::DecompositionDiscriminator)
                         .expect("missing decomposition discriminator")
                         .clone();
-                    let task = DecompositionVoteTask::new(
-                        step_id,
-                        agent,
-                        llm.clone(),
-                        self.options.default_k,
-                    );
+                    let vote_k =
+                        self.resolve_k(AgentKind::DecompositionDiscriminator, &agent, context);
+                    let task = DecompositionVoteTask::new(step_id, agent, llm.clone(), vote_k);
                     let result = task.run(context).await?;
                     Self::ensure_continue(result.action)?;
                     if let TaskEffect::SpawnedSteps(children) = result.effect {
@@ -113,7 +121,8 @@ impl FlowRunner {
                         .get(&AgentKind::Solver)
                         .expect("missing solver agent")
                         .clone();
-                    let task = SolveTask::new(step_id, agent, llm.clone());
+                    let task =
+                        SolveTask::new(step_id, agent, llm.clone(), red_flag_pipeline.clone());
                     let result = task.run(context).await?;
                     Self::ensure_continue(result.action)?;
                     if matches!(result.effect, TaskEffect::SolutionsReady { .. }) {
@@ -127,8 +136,8 @@ impl FlowRunner {
                         .get(&AgentKind::SolutionDiscriminator)
                         .expect("missing solution discriminator")
                         .clone();
-                    let task =
-                        SolutionVoteTask::new(step_id, agent, llm.clone(), self.options.default_k);
+                    let vote_k = self.resolve_k(AgentKind::SolutionDiscriminator, &agent, context);
+                    let task = SolutionVoteTask::new(step_id, agent, llm.clone(), vote_k);
                     let result = task.run(context).await?;
                     Self::ensure_continue(result.action)?;
                     if let TaskEffect::StepCompleted { step_id } = result.effect {
@@ -181,6 +190,38 @@ impl FlowRunner {
             NextAction::GoTo(_) => Err(anyhow!("GoTo transitions not implemented yet")),
             NextAction::Error(msg) => Err(anyhow!("Task reported error: {msg}")),
         }
+    }
+
+    fn resolve_k(&self, agent_kind: AgentKind, agent: &AgentConfig, context: &Context) -> usize {
+        let base = agent.k.unwrap_or(self.options.default_k).max(1);
+        if !self.options.adaptive_k {
+            return base;
+        }
+
+        if let Some(stats) = context.metrics().vote_stats(agent_kind) {
+            if !stats.recent_margins.is_empty() {
+                let sum: usize = stats.recent_margins.iter().copied().sum();
+                let avg = sum as f32 / stats.recent_margins.len() as f32;
+                let mut adjusted = base;
+                if avg < base as f32 * 0.75 {
+                    adjusted = base + 1;
+                } else if avg > base as f32 * 1.5 && base > 1 {
+                    adjusted = base - 1;
+                }
+                if adjusted != base {
+                    debug!(
+                        ?agent_kind,
+                        base_k = base,
+                        adjusted_k = adjusted,
+                        avg_margin = avg,
+                        "Adaptive k adjustment"
+                    );
+                }
+                return adjusted.max(1);
+            }
+        }
+
+        base
     }
 
     fn agent_configs(&self, domain: &DomainConfig) -> HashMap<AgentKind, AgentConfig> {

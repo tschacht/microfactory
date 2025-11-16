@@ -293,6 +293,8 @@ This section describes a suggested implementation sequence assuming the work is 
 - Implement an optional adaptive `k` strategy (enabled via `--adaptive-k`) that uses metrics to adjust `k` per step or step type, following the spirit of MAKER’s scaling laws (keep it simple and well-bounded).
 - Add trace logging using `tracing` for key events (decomposition decisions, vote outcomes, red flags, verification results).
 
+**Implementation Status (Nov 16, 2025):** Completed. Domains now build a `RedFlagPipeline` from the YAML `red_flaggers` block (with built-in `length` and `syntax` checkers), and every sampling task routes responses through that pipeline. Flagged samples are logged via `tracing`, recorded in per-step metrics (including sample/resample counts, red-flag incidents, vote margins, timing, and verification outcomes), and resampled until the quorum of clean candidates is met. The CLI’s `--adaptive-k` switch now activates a heuristic that tightens or relaxes the voting margin per agent type based on the rolling average of recent margins captured in `WorkflowMetrics`. Decomposition, solving, and voting tasks emit structured trace events so Phase 4 observability requirements are satisfied, and new unit tests cover the red-flag resampling path.
+
 ### Phase 5: Human-in-Loop, Persistence, and Subprocess Mode
 
 - Implement `NextAction::WaitForInput` handling so that steps can pause for human approval or intervention based on configured triggers (e.g., repeated failures, high disagreement, frequent red flags).

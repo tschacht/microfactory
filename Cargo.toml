@@ -27,3 +27,9 @@ predicates = "3.1"
 tempfile = "3.10"
 uuid = { version = "1.10", features = ["v4"] }
 tower = "0.4"
+
+[workspace]
+members = [
+    "integration-tests",
+]
+resolver = "2"

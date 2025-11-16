@@ -311,8 +311,18 @@ This section describes a suggested implementation sequence assuming the work is 
 - Avoid premature optimization: do not introduce new dependencies or significant refactors unless required to support new domains or performance bottlenecks observed in practice.
 - Keep all phases backward-compatible with the CLI and config structures described in this document; if changes are necessary, update this document first (not as part of automated LLM implementation steps).
 - Surface session summaries (e.g., structured JSON export from `microfactory status`) so external orchestrators can monitor workflows without scraping stdout.
+- Provide guidance for a follow-on HTTP status surface: prioritize an embedded `microfactory serve` command that exposes the existing JSON session summaries over HTTP (REST + SSE/WebSocket) so dashboards or supervising agents can subscribe once and avoid repeated CLI polling; daemon-style sockets are optional icing for tightly coupled integrations but carry higher tooling friction.
 
 **Implementation Status (Nov 16, 2025):** Completed. `config.rs` now validates each domain’s agents, granularity, and red-flaggers while hydrating prompt templates from disk, and the repository ships Handlebars templates for both the existing `code` preset and a new `analysis` domain to demonstrate cross-domain coverage. The CLI’s `status` command gained `--json`/`--limit` flags so higher-level tooling can pull machine-readable session summaries, while runtime errors now enumerate available domains when a mismatch occurs. `config.yaml` documents the expanded domains, and `templates/` holds the prompts referenced by the configuration, ensuring hardening + domain expansion goals are met.
+
+### Phase 7: Session Service Surface (Optional Extension)
+
+- Introduce a `microfactory serve` subcommand that runs an embedded Tokio HTTP server, reusing the SQLite session store to expose `GET /sessions` (list with pagination) and `GET /sessions/{id}` (detailed view) endpoints that return the same JSON payloads emitted by `microfactory status --json`.
+- Add an SSE or WebSocket stream (e.g., `/sessions/stream`) that pushes session state transitions (running → paused/completed, wait-state updates) so operator dashboards and supervising agents receive near-real-time notifications without polling.
+- Keep authentication simple (localhost-only token or OS permissions) and document how to deploy as a background service (systemd, tmux, etc.). Offer guidance on when to prefer this HTTP surface over a bespoke daemon: HTTP is universally consumable and easy to proxy, whereas a custom daemon/socket can be reserved for tightly coupled workflows that need bidirectional control.
+- Optional future work: layer a Unix-domain-socket daemon or message-queue publisher atop the same event stream if a particular deployment requires it, but treat that as additive, not a replacement for the HTTP surface.
+
+**Implementation Status:** Not started. This phase is intentionally scoped as an extension once real users need push-style monitoring or API access beyond the CLI.
 
 ## Implementation Notes
 - Start prototyping with a single-task graph.

@@ -531,4 +531,51 @@ mod tests {
             .count();
         assert_eq!(completed, 2, "two subtasks solved");
     }
+
+    #[tokio::test]
+    async fn executes_analysis_domain_with_default_config() {
+        let config = Arc::new(
+            MicrofactoryConfig::from_path("config.yaml").expect("default config.yaml should load"),
+        );
+        let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
+            vec![
+                "- Produce executive-ready insight".into(),
+                "- Draft alternative plan".into(),
+            ],
+            vec!["1".into(), "1".into()],
+            vec![
+                "Finding A: adoption up 12%".into(),
+                "Finding B: adoption flat".into(),
+                "Finding C: adoption down".into(),
+                "Finding D: inconclusive".into(),
+            ],
+            vec!["1".into(), "1".into()],
+        ]));
+
+        let mut context = Context::new(
+            "Assess quarterly adoption trends for analytics rollout",
+            "analysis",
+        );
+        let runner = FlowRunner::new(config, Some(llm), RunnerOptions::default());
+        let outcome = runner.execute(&mut context).await.unwrap();
+        assert!(matches!(outcome, RunnerOutcome::Completed));
+
+        let root = context.root_step_id().expect("root step available");
+        let root_step = context.step(root).expect("root step exists");
+        assert_eq!(root_step.children.len(), 1, "one analysis subtask spawned");
+        let child_id = root_step.children[0];
+        let child = context.step(child_id).expect("child step present");
+        assert_eq!(child.status, StepStatus::Completed);
+        assert_eq!(
+            child.winning_solution.as_deref(),
+            Some("Finding A: adoption up 12%"),
+            "expected winning solution recorded"
+        );
+        let metrics = context
+            .metrics()
+            .step_metrics(child_id)
+            .expect("metrics recorded for child");
+        assert_eq!(metrics.samples_requested, 4, "solver sampled four times");
+        assert_eq!(metrics.vote_margin, Some(2));
+    }
 }

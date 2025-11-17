@@ -149,7 +149,7 @@ impl SessionStore {
                     Ok((status_str, context_json, metadata_json, updated_at))
                 },
             )
-            .with_context(|| format!("Session {} not found", session_id))?;
+            .with_context(|| format!("Session {session_id} not found"))?;
 
         let status = SessionStatus::from_str(&row.0)
             .ok_or_else(|| anyhow!("Invalid status '{}' in store", row.0))?;
@@ -187,7 +187,7 @@ impl SessionStore {
         for row in rows {
             let (session_id, prompt, domain, status_str, updated_at) = row?;
             let status = SessionStatus::from_str(&status_str)
-                .ok_or_else(|| anyhow!("Invalid status '{}' in store", status_str))?;
+                .ok_or_else(|| anyhow!("Invalid status '{status_str}' in store"))?;
             summaries.push(SessionSummary {
                 session_id,
                 prompt,

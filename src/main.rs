@@ -128,7 +128,7 @@ async fn status_command(args: StatusArgs) -> Result<()> {
             let summary = SessionDetailExport::from_record(&record);
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {
-            println!("Session: {}", id);
+            println!("Session: {id}");
             println!("Status: {}", record.status.as_str());
             println!("Prompt: {}", record.envelope.context.prompt);
             println!("Domain: {}", record.envelope.context.domain);
@@ -353,7 +353,7 @@ fn render_help_text(section: &HelpSection) {
         println!();
         println!("Usage examples:");
         for example in &section.usage_examples {
-            println!("  {}", example);
+            println!("  {example}");
         }
     }
     if !section.key_flags.is_empty() {
@@ -367,7 +367,7 @@ fn render_help_text(section: &HelpSection) {
         println!();
         println!("Notes:");
         for note in &section.notes {
-            println!("  - {}", note);
+            println!("  - {note}");
         }
     }
     println!();
@@ -606,7 +606,7 @@ fn resolve_api_key(cli_value: Option<String>, provider: LlmProvider) -> Result<S
     let env_var = provider.env_var();
     let env_value = std::env::var(env_var).ok();
     pick_api_key(cli_value, env_value)
-        .map_err(|_| anyhow!("Missing API key: pass --api-key or set {}", env_var))
+        .map_err(|_| anyhow!("Missing API key: pass --api-key or set {env_var}"))
 }
 
 fn pick_api_key(cli_value: Option<String>, env_value: Option<String>) -> Result<String> {
@@ -718,9 +718,7 @@ fn ensure_domain_exists(config: &Arc<MicrofactoryConfig>, domain: &str) -> Resul
                 .join(", ")
         };
         return Err(anyhow!(
-            "Domain '{}' not defined in provided configuration. Available domains: {}",
-            domain,
-            available
+            "Domain '{domain}' not defined in provided configuration. Available domains: {available}"
         ));
     }
     Ok(())

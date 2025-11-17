@@ -328,8 +328,7 @@ impl FlowRunner {
                 step_id,
                 trigger: format!("{stage}_low_margin"),
                 details: format!(
-                    "Vote margin ({}) during {} fell below threshold",
-                    margin, stage
+                    "Vote margin ({margin}) during {stage} fell below threshold"
                 ),
             });
         }

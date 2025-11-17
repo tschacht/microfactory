@@ -404,8 +404,7 @@ domains:
         let messages: Vec<String> = err.chain().map(|cause| cause.to_string()).collect();
         assert!(
             messages.iter().any(|msg| msg.contains("max_tokens")),
-            "error chain missing max_tokens context: {:?}",
-            messages
+            "error chain missing max_tokens context: {messages:?}"
         );
     }
 }

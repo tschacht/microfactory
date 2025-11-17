@@ -12,7 +12,10 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use microfactory::{
-    cli::{Cli, Commands, LlmProvider, ResumeArgs, RunArgs, ServeArgs, StatusArgs, SubprocessArgs},
+    cli::{
+        Cli, Commands, HelpArgs, HelpFormat, HelpTopic, LlmProvider, ResumeArgs, RunArgs,
+        ServeArgs, StatusArgs, SubprocessArgs,
+    },
     config::MicrofactoryConfig,
     context::{Context, StepMetrics, WorkItem},
     llm::{LlmClient, RigLlmClient},
@@ -34,6 +37,7 @@ async fn main() -> Result<()> {
         Commands::Resume(args) => resume_command(args).await?,
         Commands::Subprocess(args) => subprocess_command(args).await?,
         Commands::Serve(args) => serve_command(args).await?,
+        Commands::Help(args) => help_command(args).await?,
     }
     Ok(())
 }
@@ -330,6 +334,258 @@ async fn serve_command(args: ServeArgs) -> Result<()> {
     };
     println!("Serving session API on http://{addr}");
     server::run(addr, store, options).await
+}
+
+async fn help_command(args: HelpArgs) -> Result<()> {
+    let topic = args.topic.unwrap_or(HelpTopic::Overview);
+    let section = build_help_section(topic);
+    match args.format {
+        HelpFormat::Text => render_help_text(&section),
+        HelpFormat::Json => println!("{}", serde_json::to_string_pretty(&section)?),
+    }
+    Ok(())
+}
+
+fn render_help_text(section: &HelpSection) {
+    println!("Topic: {}", section.topic);
+    println!("Summary: {}", section.summary);
+    if !section.usage_examples.is_empty() {
+        println!();
+        println!("Usage examples:");
+        for example in &section.usage_examples {
+            println!("  {}", example);
+        }
+    }
+    if !section.key_flags.is_empty() {
+        println!();
+        println!("Key flags:");
+        for flag in &section.key_flags {
+            println!("  {:<24}{}", flag.flag, flag.description);
+        }
+    }
+    if !section.notes.is_empty() {
+        println!();
+        println!("Notes:");
+        for note in &section.notes {
+            println!("  - {}", note);
+        }
+    }
+    println!();
+    println!("Tip: every subcommand also supports the standard `--help` output.");
+}
+
+fn build_help_section(topic: HelpTopic) -> HelpSection {
+    match topic {
+        HelpTopic::Overview => HelpSection {
+            topic: "overview",
+            summary: "Microfactory runs MAKER-inspired workflows (decompose → solve → verify) with persistence, resume, and HTTP monitoring endpoints.",
+            usage_examples: vec![
+                r#"microfactory run --prompt "refactor api" --domain code"#,
+                "microfactory status --json --limit 5",
+                "microfactory serve --bind 0.0.0.0 --port 8080",
+            ],
+            key_flags: vec![
+                FlagHelp {
+                    flag: "run",
+                    description: "Start a new workflow session backed by the domain config.",
+                },
+                FlagHelp {
+                    flag: "status",
+                    description: "Query stored sessions (human output by default, JSON via --json).",
+                },
+                FlagHelp {
+                    flag: "resume",
+                    description: "Continue a paused session after addressing the wait reason.",
+                },
+                FlagHelp {
+                    flag: "subprocess",
+                    description: "Execute a single MAKER step in isolation and emit JSON.",
+                },
+                FlagHelp {
+                    flag: "serve",
+                    description: "Expose sessions over HTTP (REST + SSE) for higher-level tooling.",
+                },
+            ],
+            notes: vec![
+                "Use `microfactory help --topic <command>` for focused instructions or `--format json` for machine parsing.",
+                "API keys load from ~/.env first, then fall back to real env vars.",
+                "Session data lives under ~/.microfactory (override via MICROFACTORY_HOME).",
+            ],
+        },
+        HelpTopic::Run => HelpSection {
+            topic: "run",
+            summary: "Execute the full MAKER workflow for a given prompt within a configured domain.",
+            usage_examples: vec![
+                r#"microfactory run --prompt "stabilize auth" --domain code --config config.yaml"#,
+                r#"microfactory run --prompt "audit notebooks" --domain analysis --dry-run --samples 6 --k 4"#,
+            ],
+            key_flags: vec![
+                FlagHelp {
+                    flag: "--prompt <text>",
+                    description: "Required task description fed into the decomposition agent.",
+                },
+                FlagHelp {
+                    flag: "--domain <name>",
+                    description: "Selects which domain section of the YAML config to load (e.g. code).",
+                },
+                FlagHelp {
+                    flag: "--config <path>",
+                    description: "Defaults to ./config.yaml; point to custom configs per domain.",
+                },
+                FlagHelp {
+                    flag: "--llm-provider <id>",
+                    description: "openai | anthropic | gemini | grok; determines API key lookup.",
+                },
+                FlagHelp {
+                    flag: "--llm-model <name>",
+                    description: "Model identifier passed directly to the provider (e.g. gpt-4.1).",
+                },
+                FlagHelp {
+                    flag: "--samples <n>",
+                    description: "Samples per microagent step (default 10).",
+                },
+                FlagHelp {
+                    flag: "--k <n>",
+                    description: "First-to-ahead-by-k voting margin (default 3).",
+                },
+                FlagHelp {
+                    flag: "--adaptive-k",
+                    description: "Enable adaptive voting margins driven by live metrics.",
+                },
+                FlagHelp {
+                    flag: "--dry-run",
+                    description: "Skips persistence and issues a single LLM probe for validation.",
+                },
+            ],
+            notes: vec![
+                "Successful runs persist context + metadata; inspect progress via `status` or the HTTP service.",
+                "Set MICROFACTORY_HOME to isolate state per project or CI worker.",
+            ],
+        },
+        HelpTopic::Status => HelpSection {
+            topic: "status",
+            summary: "Inspect stored sessions (human-readable or JSON).",
+            usage_examples: vec![
+                "microfactory status --limit 5",
+                "microfactory status --session-id a1b2 --json",
+            ],
+            key_flags: vec![
+                FlagHelp {
+                    flag: "--session-id <id>",
+                    description: "Show detailed information for a single session.",
+                },
+                FlagHelp {
+                    flag: "--limit <n>",
+                    description: "Restrict the number of listed sessions (default 10).",
+                },
+                FlagHelp {
+                    flag: "--json",
+                    description: "Emit structured summaries matching the HTTP API schema.",
+                },
+            ],
+            notes: vec![
+                "Use JSON output for LLM or dashboard ingestion without scraping stdout.",
+                "Combine with `jq`/`gron` to filter for paused or failed sessions quickly.",
+            ],
+        },
+        HelpTopic::Resume => HelpSection {
+            topic: "resume",
+            summary: "Continue a paused/failed session using stored metadata (override options available).",
+            usage_examples: vec![
+                "microfactory resume --session-id a1b2",
+                "microfactory resume --session-id a1b2 --llm-provider anthropic --llm-model claude-3.5",
+            ],
+            key_flags: vec![
+                FlagHelp {
+                    flag: "--session-id <id>",
+                    description: "Target session UUID (required).",
+                },
+                FlagHelp {
+                    flag: "--config <path>",
+                    description: "Override the saved config path if files moved.",
+                },
+                FlagHelp {
+                    flag: "--llm-provider|--llm-model",
+                    description: "Swap providers/models without editing persisted metadata.",
+                },
+                FlagHelp {
+                    flag: "--samples|--k|--max-concurrent-llm",
+                    description: "Tweak runtime parameters prior to resuming.",
+                },
+            ],
+            notes: vec![
+                "Wait-state triggers are cleared automatically so execution can continue.",
+                "Failures update their status immediately; inspect via `status --session-id <id>`.",
+            ],
+        },
+        HelpTopic::Subprocess => HelpSection {
+            topic: "subprocess",
+            summary: "Run a single microtask (e.g., solver) with JSON I/O for tooling hooks.",
+            usage_examples: vec![
+                r#"microfactory subprocess --domain code --step solver --context-json '{"files":["lib.rs"]}' --samples 4"#,
+            ],
+            key_flags: vec![
+                FlagHelp {
+                    flag: "--step <name>",
+                    description: "Select the microtask (solver, verifier, etc.).",
+                },
+                FlagHelp {
+                    flag: "--context-json <blob>",
+                    description: "Inline JSON merged into the domain-specific context.",
+                },
+                FlagHelp {
+                    flag: "--samples / --k",
+                    description: "Sampling + vote settings for this isolated run.",
+                },
+            ],
+            notes: vec![
+                "Outputs SubprocessOutput JSON: session, step, candidates, winner, metrics.",
+                "Great for editor commands or CI bots needing a single reasoning step.",
+            ],
+        },
+        HelpTopic::Serve => HelpSection {
+            topic: "serve",
+            summary: "Expose sessions via REST + SSE so dashboards or agents can monitor progress.",
+            usage_examples: vec!["microfactory serve --bind 0.0.0.0 --port 8080"],
+            key_flags: vec![
+                FlagHelp {
+                    flag: "--bind <ip>",
+                    description: "Interface for the Axum HTTP server (default 127.0.0.1).",
+                },
+                FlagHelp {
+                    flag: "--port <n>",
+                    description: "Port number (default 8080).",
+                },
+                FlagHelp {
+                    flag: "--limit <n>",
+                    description: "Default page size for GET /sessions when clients omit limit.",
+                },
+                FlagHelp {
+                    flag: "--poll-interval-ms <n>",
+                    description: "SSE polling cadence for /sessions/stream (min 250ms).",
+                },
+            ],
+            notes: vec![
+                "Endpoints: GET /sessions, GET /sessions/{id}, GET /sessions/stream (SSE).",
+                "Combine with `curl` or dashboards to watch sessions without invoking the CLI.",
+                "Serve shares the same serialization structs as status --json for parity.",
+            ],
+        },
+    }
+}
+#[derive(Debug, Clone, Serialize)]
+struct HelpSection {
+    topic: &'static str,
+    summary: &'static str,
+    usage_examples: Vec<&'static str>,
+    key_flags: Vec<FlagHelp>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FlagHelp {
+    flag: &'static str,
+    description: &'static str,
 }
 
 fn load_config(path: &PathBuf) -> Result<MicrofactoryConfig> {

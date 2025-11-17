@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "microfactory")]
 #[command(about = "MAKER-inspired workflow runner", version)]
+#[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -23,6 +24,8 @@ pub enum Commands {
     Subprocess(SubprocessArgs),
     /// Serve session data over HTTP (REST + SSE).
     Serve(ServeArgs),
+    /// Provide structured help so operators or agents can self-orient.
+    Help(HelpArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -214,6 +217,41 @@ pub struct ServeArgs {
     pub poll_interval_ms: u64,
 }
 
+#[derive(Debug, Args, Clone)]
+pub struct HelpArgs {
+    #[arg(
+        value_enum,
+        long,
+        short = 't',
+        help = "Specific topic to explain (defaults to overview)"
+    )]
+    pub topic: Option<HelpTopic>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = HelpFormat::Text,
+        help = "Output format: text or json"
+    )]
+    pub format: HelpFormat,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+pub enum HelpTopic {
+    Overview,
+    Run,
+    Status,
+    Resume,
+    Subprocess,
+    Serve,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+pub enum HelpFormat {
+    Text,
+    Json,
+}
+
 /// Supported LLM providers surfaced via the CLI.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 #[clap(rename_all = "lower")]
@@ -331,6 +369,19 @@ mod tests {
                 assert_eq!(args.poll_interval_ms, 500);
             }
             _ => panic!("expected serve command"),
+        }
+    }
+
+    #[test]
+    fn parses_help_with_topic_and_format() {
+        let cli = Cli::parse_from(["microfactory", "help", "--topic", "run", "--format", "json"]);
+
+        match cli.command {
+            Commands::Help(args) => {
+                assert!(matches!(args.topic, Some(HelpTopic::Run)));
+                assert!(matches!(args.format, HelpFormat::Json));
+            }
+            _ => panic!("expected help command"),
         }
     }
 }

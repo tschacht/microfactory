@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde_yaml::Value;
+use tree_sitter::{Parser, Tree};
 
 use crate::config::RedFlaggerConfig;
 use crate::llm::LlmClient;
@@ -125,13 +126,68 @@ impl RedFlagger for SyntaxRedFlagger {
     }
 
     async fn flag(&self, candidate: &str) -> Result<Option<String>> {
-        if is_unbalanced(candidate) {
-            Ok(Some(format!(
-                "{} delimiters appear unbalanced",
-                self.language
-            )))
+        let language = match self.language.as_str() {
+            "python" => tree_sitter_python::LANGUAGE.into(),
+            "java" => tree_sitter_java::LANGUAGE.into(),
+            "rust" => tree_sitter_rust::LANGUAGE.into(),
+            _ => {
+                // Fallback to simple check for non-supported languages
+                if is_unbalanced(candidate) {
+                    return Ok(Some(format!(
+                        "{} delimiters appear unbalanced (simple check)",
+                        self.language
+                    )));
+                }
+                return Ok(None);
+            }
+        };
+
+        let mut parser = Parser::new();
+        parser
+            .set_language(&language)
+            .context("Error loading grammar")?;
+
+        let tree = parser
+            .parse(candidate, None)
+            .context("Failed to parse code")?;
+
+        if let Some(error) = find_syntax_error(&tree) {
+            Ok(Some(format!("Syntax error detected: {}", error)))
         } else {
             Ok(None)
+        }
+    }
+}
+
+fn find_syntax_error(tree: &Tree) -> Option<String> {
+    let mut cursor = tree.walk();
+
+    // Pre-order traversal
+    loop {
+        let node = cursor.node();
+        if node.is_error() {
+            return Some(format!(
+                "Error at line {}, column {}",
+                node.start_position().row + 1,
+                node.start_position().column + 1
+            ));
+        }
+        if node.is_missing() {
+            return Some(format!(
+                "Missing token at line {}, column {}",
+                node.start_position().row + 1,
+                node.start_position().column + 1
+            ));
+        }
+
+        if cursor.goto_first_child() {
+            continue;
+        }
+
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return None;
+            }
         }
     }
 }
@@ -216,12 +272,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn syntax_flagger_detects_unbalanced() {
+    async fn syntax_flagger_detects_errors() {
         let flagger = SyntaxRedFlagger {
             language: "python".into(),
         };
-        assert!(flagger.flag("def foo(:").await.unwrap().is_some());
+        // Invalid Python: missing colon
+        assert!(flagger.flag("def foo() pass").await.unwrap().is_some());
+        // Valid Python
         assert!(flagger.flag("def foo(): pass").await.unwrap().is_none());
+
+        let rust_flagger = SyntaxRedFlagger {
+            language: "rust".into(),
+        };
+        // Invalid Rust: missing semicolon
+        assert!(
+            rust_flagger
+                .flag("fn main() { let x = 1 }")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Valid Rust
+        assert!(
+            rust_flagger
+                .flag("fn main() { let x = 1; }")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let java_flagger = SyntaxRedFlagger {
+            language: "java".into(),
+        };
+        // Invalid Java: missing semicolon
+        assert!(
+            java_flagger
+                .flag("class Main { void main() { int x = 1 } }")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Valid Java
+        assert!(
+            java_flagger
+                .flag("class Main { void main() { int x = 1; } }")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

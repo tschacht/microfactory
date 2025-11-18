@@ -324,6 +324,33 @@ This section describes a suggested implementation sequence assuming the work is 
 
 **Implementation Status (Nov 16, 2025):** Completed. The CLI now exposes `microfactory serve`, which binds an embedded Axum/Tokio HTTP server to configurable host/port, serving `GET /sessions` (with optional `?limit=`) and `GET /sessions/{id}` responses identical to `status --json`. A `/sessions/stream` SSE endpoint emits periodic JSON snapshots so dashboards and supervising agents can subscribe once rather than poll the CLI. The server reuses the existing SQLite `SessionStore`, enforces sensible defaults (localhost bind, rate-limited polling), and includes unit tests for the REST handlers. Future daemon/socket integrations remain optional add-ons atop this HTTP surface.
 
+### Phase 8: Library-First Refactor & Background Workers
+
+**Goal:** Decouple the core orchestration logic from the CLI binary to support a robust, long-running background server with a thread worker pool. This transforms Microfactory from a "script runner" into a "platform" capable of managing concurrent sessions programmatically.
+
+**Reasoning:**
+Currently, `FlowRunner` and session management logic are tightly coupled to the CLI entry points (`main.rs`, `cli.rs`). The HTTP server (`serve`) is read-only because it cannot easily spawn a `FlowRunner` without blocking its async runtime or duplicating complex setup logic. To support `POST /resume` and future features like job queues, the core logic must be extractable.
+
+**Implementation Plan:**
+
+1.  **Extract Core Logic (`lib.rs`):**
+    *   Move "glue" logic (config loading, API key resolution, runner initialization) from `main.rs` into a new `SessionManager` struct in the library crate.
+    *   `SessionManager` should handle the full lifecycle: creating sessions, loading from SQLite, initializing `FlowRunner`, and executing workflows.
+
+2.  **Make `FlowRunner` Shareable:**
+    *   Ensure `FlowRunner` and its dependencies (LLM client, Handlebars registry) are cheap to clone or share (via `Arc`) across threads.
+
+3.  **Implement Job Queue & Worker Pool:**
+    *   Introduce an in-memory job queue (e.g., `tokio::sync::mpsc` or `deadqueue`) within the `serve` process.
+    *   Spawn a background worker task that consumes session IDs from the queue and uses `SessionManager` to execute them.
+    *   This replaces the need to "shell out" to the CLI for background tasks, improving performance and observability.
+
+4.  **Refactor CLI & Server:**
+    *   Update `microfactory run` and `resume` to be thin wrappers around `SessionManager`.
+    *   Update `POST /sessions/:id/resume` to push the session ID into the job queue instead of returning 501 or shelling out.
+
+**Note:** For the immediate term (TASK-006), the `resume` endpoint may use a simpler "shell out" strategy (executing `microfactory resume` as a subprocess) to provide functionality before this major refactor is undertaken.
+
 ## Implementation Notes
 - Start prototyping with a single-task graph.
 - Test with small tasks (e.g., fix one test) before scaling.

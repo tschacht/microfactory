@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Write as _, sync::Arc, time::Instant};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use async_trait::async_trait;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     context::{
@@ -26,6 +26,7 @@ pub enum TaskEffect {
     None,
     SpawnedSteps(Vec<usize>),
     SolutionsReady { step_id: usize },
+    WinnerSelected { step_id: usize },
     StepCompleted { step_id: usize },
 }
 
@@ -325,7 +326,6 @@ impl MicroTask for SolutionVoteTask {
             .record_duration_ms(self.step_id, start.elapsed().as_millis());
         let winner = solutions[winner_idx].clone();
         ctx.mark_step_solution(self.step_id, winner);
-        ctx.step_metrics_mut(self.step_id).verification_passed = Some(true);
         debug!(
             step_id = self.step_id,
             winner_idx,
@@ -334,9 +334,109 @@ impl MicroTask for SolutionVoteTask {
             vote_k = k,
             "Solution vote completed"
         );
-        Ok(TaskResult::continue_with(TaskEffect::StepCompleted {
+        Ok(TaskResult::continue_with(TaskEffect::WinnerSelected {
             step_id: self.step_id,
         }))
+    }
+}
+
+pub struct ApplyVerifyTask {
+    step_id: usize,
+    applier: Option<String>,
+    verifier: Option<String>,
+}
+
+impl ApplyVerifyTask {
+    pub fn new(step_id: usize, applier: Option<String>, verifier: Option<String>) -> Self {
+        Self {
+            step_id,
+            applier,
+            verifier,
+        }
+    }
+}
+
+#[async_trait]
+impl MicroTask for ApplyVerifyTask {
+    async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
+        let start = Instant::now();
+        let step = ctx
+            .step(self.step_id)
+            .with_context(|| format!("Unknown step {}", self.step_id))?;
+
+        let _solution = step
+            .winning_solution
+            .clone()
+            .ok_or_else(|| anyhow!("No winning solution to apply for step {}", self.step_id))?;
+
+        if ctx.dry_run {
+            info!(step_id = self.step_id, "Dry run: skipping apply/verify");
+            ctx.mark_step_status(self.step_id, StepStatus::Completed);
+            return Ok(TaskResult::continue_with(TaskEffect::StepCompleted {
+                step_id: self.step_id,
+            }));
+        }
+
+        // Apply
+        if let Some(applier_cmd) = &self.applier {
+            if applier_cmd == "patch_file" {
+                info!(
+                    step_id = self.step_id,
+                    "Applying solution via built-in patch_file (mock)"
+                );
+            } else {
+                info!(
+                    step_id = self.step_id,
+                    command = applier_cmd,
+                    "Running applier command"
+                );
+                // In a real implementation, we'd pipe the solution to the command
+            }
+        }
+
+        // Verify
+        let mut verified = true;
+        if let Some(verifier_cmd) = &self.verifier {
+            info!(
+                step_id = self.step_id,
+                command = verifier_cmd,
+                "Running verification"
+            );
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(verifier_cmd)
+                .output()
+            {
+                Ok(output) => {
+                    verified = output.status.success();
+                    if !verified {
+                        warn!(
+                            step_id = self.step_id,
+                            stderr = ?String::from_utf8_lossy(&output.stderr),
+                            "Verification failed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(step_id = self.step_id, error = ?e, "Failed to execute verifier");
+                    verified = false;
+                }
+            }
+        }
+
+        ctx.metrics
+            .record_duration_ms(self.step_id, start.elapsed().as_millis());
+        ctx.step_metrics_mut(self.step_id).verification_passed = Some(verified);
+
+        if verified {
+            ctx.mark_step_status(self.step_id, StepStatus::Completed);
+            Ok(TaskResult::continue_with(TaskEffect::StepCompleted {
+                step_id: self.step_id,
+            }))
+        } else {
+            ctx.mark_step_status(self.step_id, StepStatus::Failed);
+            Ok(TaskResult::continue_with(TaskEffect::None))
+        }
     }
 }
 

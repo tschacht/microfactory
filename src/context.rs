@@ -350,6 +350,7 @@ pub enum WorkItem {
     DecompositionVote { step_id: usize },
     Solve { step_id: usize },
     SolutionVote { step_id: usize },
+    ApplyVerify { step_id: usize },
 }
 
 impl WorkItem {
@@ -358,7 +359,8 @@ impl WorkItem {
             WorkItem::Decomposition { step_id }
             | WorkItem::DecompositionVote { step_id }
             | WorkItem::Solve { step_id }
-            | WorkItem::SolutionVote { step_id } => step_id,
+            | WorkItem::SolutionVote { step_id }
+            | WorkItem::ApplyVerify { step_id } => step_id,
         }
     }
 }

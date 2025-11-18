@@ -9,8 +9,8 @@ use crate::{
     llm::LlmClient,
     red_flaggers::RedFlagPipeline,
     tasks::{
-        DecompositionTask, DecompositionVoteTask, MicroTask, NextAction, SolutionVoteTask,
-        SolveTask, TaskEffect,
+        ApplyVerifyTask, DecompositionTask, DecompositionVoteTask, MicroTask, NextAction,
+        SolutionVoteTask, SolveTask, TaskEffect,
     },
 };
 
@@ -172,6 +172,22 @@ impl FlowRunner {
                     {
                         return Ok(self.pause_with(context, wait, WorkItem::Solve { step_id }));
                     }
+                    if let TaskEffect::WinnerSelected { step_id } = result.effect {
+                        context.enqueue_work_front(WorkItem::ApplyVerify { step_id });
+                    }
+                }
+                WorkItem::ApplyVerify { step_id } => {
+                    let task = ApplyVerifyTask::new(
+                        step_id,
+                        domain_cfg.applier.clone(),
+                        domain_cfg.verifier.clone(),
+                    );
+                    let result = task.run(context).await?;
+                    if let Some(outcome) =
+                        self.handle_next_action(result.action, &current_item, context)
+                    {
+                        return Ok(outcome);
+                    }
                     if let TaskEffect::StepCompleted { step_id } = result.effect
                         && let Some(step) = context.step(step_id)
                     {
@@ -327,9 +343,7 @@ impl FlowRunner {
             return Some(WaitState {
                 step_id,
                 trigger: format!("{stage}_low_margin"),
-                details: format!(
-                    "Vote margin ({margin}) during {stage} fell below threshold"
-                ),
+                details: format!("Vote margin ({margin}) during {stage} fell below threshold"),
             });
         }
         None
@@ -575,5 +589,55 @@ mod tests {
             .expect("metrics recorded for child");
         assert_eq!(metrics.samples_requested, 4, "solver sampled four times");
         assert_eq!(metrics.vote_margin, Some(2));
+    }
+
+    #[tokio::test]
+    async fn executes_apply_verify_flow() {
+        let yaml = r#"
+        domains:
+          test_verify:
+            agents:
+              decomposition:
+                prompt_template: "d"
+                model: "m"
+                samples: 1
+              decomposition_discriminator:
+                prompt_template: "dv"
+                model: "m"
+                k: 1
+              solver:
+                prompt_template: "s"
+                model: "m"
+                samples: 1
+              solution_discriminator:
+                prompt_template: "sv"
+                model: "m"
+                k: 1
+            verifier: "true"
+            applier: "patch_file"
+        "#;
+        let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml).unwrap());
+        let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
+            vec!["- task".into()], // decomposition
+            vec!["1".into()],      // decomposition vote
+            vec!["sol".into()],    // solve
+            vec!["1".into()],      // solution vote
+        ]));
+
+        let mut context = Context::new("Run verify", "test_verify");
+        let runner = FlowRunner::new(config, Some(llm), RunnerOptions::default());
+        let outcome = runner.execute(&mut context).await.unwrap();
+        assert!(matches!(outcome, RunnerOutcome::Completed));
+
+        let root = context.root_step_id().unwrap();
+        let root_step = context.step(root).unwrap();
+        let child_id = root_step.children[0];
+        let child = context.step(child_id).unwrap();
+
+        assert_eq!(child.status, StepStatus::Completed);
+        assert_eq!(child.winning_solution.as_deref(), Some("sol"));
+
+        let metrics = context.metrics().step_metrics(child_id).unwrap();
+        assert_eq!(metrics.verification_passed, Some(true));
     }
 }

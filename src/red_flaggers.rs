@@ -234,4 +234,44 @@ mod tests {
         let matches = pipeline.evaluate("one two three").await;
         assert_eq!(matches.len(), 1);
     }
+
+    struct MockLlm {
+        response: String,
+    }
+
+    #[async_trait]
+    impl LlmClient for MockLlm {
+        async fn sample(&self, _prompt: &str, _model: Option<&str>) -> Result<String> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_flagger_flags_on_yes() {
+        let client = Arc::new(MockLlm {
+            response: "YES, this code is bad".into(),
+        });
+        let flagger = LlmRedFlagger {
+            client,
+            model: "test-model".into(),
+            prompt_template: "Critique: {{candidate}}".into(),
+        };
+        let result = flagger.flag("bad code").await.unwrap();
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("LLM critique flagged"));
+    }
+
+    #[tokio::test]
+    async fn llm_flagger_passes_on_no() {
+        let client = Arc::new(MockLlm {
+            response: "NO, it looks good".into(),
+        });
+        let flagger = LlmRedFlagger {
+            client,
+            model: "test-model".into(),
+            prompt_template: "Critique: {{candidate}}".into(),
+        };
+        let result = flagger.flag("good code").await.unwrap();
+        assert!(result.is_none());
+    }
 }

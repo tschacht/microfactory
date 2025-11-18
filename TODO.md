@@ -61,15 +61,3 @@ The current `microfactory serve` implementation is read-only. To allow external 
     -   Spawns a background task (or uses a shared runner handle) to resume execution. *Note: This is complex because `FlowRunner` currently runs in the foreground of the CLI process. The server might need to spawn a new process or communicate with a worker.*
     -   For V1, it might be sufficient to just update the state in SQLite to "Pending" so a separate worker can pick it up, or return a 501 Not Implemented if the architecture doesn't support background resumption yet.
 3.  **Testing**: Add an integration test in `src/server.rs`.
-
----
-
-### `TASK-004` [ ] Add Unit Test for LlmRedFlagger
-**Priority**: Medium
-**Context**:
-The `LlmRedFlagger` was implemented to provide semantic critique, but no specific unit test verifies that it correctly interprets a "yes" response from the LLM as a flag.
-
-**Implementation Details**:
-1.  **Mocking**: Create a mock `LlmClient` in `src/red_flaggers.rs` tests that returns specific responses ("yes, this is bad", "no, it's fine").
-2.  **Test Case**: Instantiate `LlmRedFlagger` with the mock client.
-3.  **Assertion**: Verify that "yes" responses result in `Ok(Some(reason))` and "no" responses result in `Ok(None)`.

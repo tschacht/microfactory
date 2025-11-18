@@ -100,6 +100,9 @@ red_flaggers:
     max_tokens: 2048
   - type: "syntax"
     language: "python"
+  - type: "llm_critique"
+    model: "gpt-4o"
+    prompt_template: "Critique this code: {{candidate}}"
 ```
 
 `src/config.rs` validates each domain (non-empty templates/models, positive `samples`/`k`, mandatory params for red-flaggers) and hydrates template files relative to the config’s directory.
@@ -165,7 +168,7 @@ For each step:
 2. **Decomposition vote:** The discriminator compares proposals via first-to-ahead-by-*k*; ties fall back to majority.
 3. **Solve:** Solver agents generate concrete patches/plans. Responses pass through the `RedFlagPipeline`; flagged samples trigger resampling (budgeted per runner options).
 4. **Solution vote:** Discriminator picks the winning candidate; metrics record vote margin, duration, sample counts.
-5. **Apply / verify (domain-specific):** Currently tracked in metrics and step status; integration with repo mutations or command runners is planned for future phases.
+5. **Apply / verify (domain-specific):** The runner executes the configured `applier` (e.g., `patch_file`) and `verifier` (e.g., `pytest`) commands. If verification fails, the step is marked as failed; otherwise, it completes.
 6. **Human pause (optional):** If resample counts, red-flag incidents, or vote margins cross thresholds, the runner records a `WaitState` and returns `RunnerOutcome::Paused` so you can inspect before resuming.
 
 ## 9. Persistence & Observability

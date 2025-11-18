@@ -34,19 +34,6 @@ Currently, `SyntaxRedFlagger` only checks for unbalanced delimiters (`()`, `[]`,
 
 ---
 
-### `TASK-002` [ ] Robust Handlebars Templating
-**Priority**: Low
-**Context**:
-The current templating logic in `src/tasks/mod.rs` uses simple string replacement (`.replace("{{prompt}}", ...)`). This prevents the use of advanced prompt features like loops (for history), conditionals, or partials. The project already depends on the `handlebars` crate but doesn't fully utilize it.
-
-**Implementation Details**:
-1.  **Refactor**: Update `render_prompt` in `src/tasks/mod.rs` to use the `handlebars` registry.
-2.  **State**: Ensure the `Handlebars` instance is initialized once (likely in `FlowRunner` or `Context`) and passed down, rather than re-created per task.
-3.  **Data**: Pass a structured context (e.g., `serde_json::json!({ "prompt": ..., "history": ..., "step": ... })`) to the render function instead of raw strings.
-4.  **Templates**: Update existing `.hbs` files in `templates/` to use standard Handlebars syntax if they don't already.
-
----
-
 ### `TASK-003` [ ] Add Resume Endpoint to HTTP Server
 **Priority**: Medium
 **Context**:

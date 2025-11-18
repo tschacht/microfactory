@@ -2,6 +2,8 @@ use std::{collections::HashMap, fmt::Write as _, sync::Arc, time::Instant};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use async_trait::async_trait;
+use handlebars::Handlebars;
+use serde_json::json;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -62,6 +64,7 @@ pub struct DecompositionTask {
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
     red_flags: Arc<RedFlagPipeline>,
+    handlebars: Arc<Handlebars<'static>>,
 }
 
 impl DecompositionTask {
@@ -71,6 +74,7 @@ impl DecompositionTask {
         agent: AgentConfig,
         llm: Arc<dyn LlmClient>,
         red_flags: Arc<RedFlagPipeline>,
+        handlebars: Arc<Handlebars<'static>>,
     ) -> Self {
         Self {
             step_id,
@@ -78,6 +82,7 @@ impl DecompositionTask {
             agent,
             llm,
             red_flags,
+            handlebars,
         }
     }
 }
@@ -87,8 +92,12 @@ impl MicroTask for DecompositionTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
         let start = Instant::now();
         let samples = self.agent.samples.max(1);
-        let rendered_prompt =
-            render_prompt(&self.agent.prompt_template, &self.prompt, "decomposition");
+        let rendered_prompt = render_prompt(
+            &self.handlebars,
+            &self.agent.prompt_template,
+            &self.prompt,
+            "decomposition",
+        )?;
         ctx.mark_step_status(self.step_id, StepStatus::Running);
         let responses = SampleCollector::new(
             ctx,
@@ -135,15 +144,23 @@ pub struct DecompositionVoteTask {
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
     vote_k: usize,
+    handlebars: Arc<Handlebars<'static>>,
 }
 
 impl DecompositionVoteTask {
-    pub fn new(step_id: usize, agent: AgentConfig, llm: Arc<dyn LlmClient>, vote_k: usize) -> Self {
+    pub fn new(
+        step_id: usize,
+        agent: AgentConfig,
+        llm: Arc<dyn LlmClient>,
+        vote_k: usize,
+        handlebars: Arc<Handlebars<'static>>,
+    ) -> Self {
         Self {
             step_id,
             agent,
             llm,
             vote_k,
+            handlebars,
         }
     }
 }
@@ -163,10 +180,11 @@ impl MicroTask for DecompositionVoteTask {
                 .collect::<Vec<_>>(),
         );
         let rendered_prompt = render_prompt(
+            &self.handlebars,
             &self.agent.prompt_template,
             &prompt_body,
             "decomposition_vote",
-        );
+        )?;
         let samples = self.agent.samples.max(1);
         let raw_votes = self
             .llm
@@ -220,6 +238,7 @@ pub struct SolveTask {
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
     red_flags: Arc<RedFlagPipeline>,
+    handlebars: Arc<Handlebars<'static>>,
 }
 
 impl SolveTask {
@@ -228,12 +247,14 @@ impl SolveTask {
         agent: AgentConfig,
         llm: Arc<dyn LlmClient>,
         red_flags: Arc<RedFlagPipeline>,
+        handlebars: Arc<Handlebars<'static>>,
     ) -> Self {
         Self {
             step_id,
             agent,
             llm,
             red_flags,
+            handlebars,
         }
     }
 }
@@ -245,7 +266,12 @@ impl MicroTask for SolveTask {
         let step = ctx
             .step(self.step_id)
             .with_context(|| format!("Unknown step {}", self.step_id))?;
-        let prompt = render_prompt(&self.agent.prompt_template, &step.description, "solve");
+        let prompt = render_prompt(
+            &self.handlebars,
+            &self.agent.prompt_template,
+            &step.description,
+            "solve",
+        )?;
         let samples = self.agent.samples.max(1);
         let responses = SampleCollector::new(
             ctx,
@@ -277,15 +303,23 @@ pub struct SolutionVoteTask {
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
     vote_k: usize,
+    handlebars: Arc<Handlebars<'static>>,
 }
 
 impl SolutionVoteTask {
-    pub fn new(step_id: usize, agent: AgentConfig, llm: Arc<dyn LlmClient>, vote_k: usize) -> Self {
+    pub fn new(
+        step_id: usize,
+        agent: AgentConfig,
+        llm: Arc<dyn LlmClient>,
+        vote_k: usize,
+        handlebars: Arc<Handlebars<'static>>,
+    ) -> Self {
         Self {
             step_id,
             agent,
             llm,
             vote_k,
+            handlebars,
         }
     }
 }
@@ -298,7 +332,12 @@ impl MicroTask for SolutionVoteTask {
             .take_solutions(self.step_id)
             .with_context(|| format!("No solutions queued for step {}", self.step_id))?;
         let prompt_body = enumerate_options(solutions.clone());
-        let vote_prompt = render_prompt(&self.agent.prompt_template, &prompt_body, "solution_vote");
+        let vote_prompt = render_prompt(
+            &self.handlebars,
+            &self.agent.prompt_template,
+            &prompt_body,
+            "solution_vote",
+        )?;
         let samples = self.agent.samples.max(1);
         let raw_votes = self
             .llm
@@ -440,15 +479,21 @@ impl MicroTask for ApplyVerifyTask {
     }
 }
 
-fn render_prompt(template: &str, body: &str, role: &str) -> String {
-    let replaced = template
-        .replace("{{prompt}}", body)
-        .replace("{{task}}", body);
-    if replaced == template {
-        format!("{template}\n\n[{role}] TASK INPUT:\n{body}")
-    } else {
-        replaced
-    }
+fn render_prompt(
+    handlebars: &Handlebars,
+    template: &str,
+    body: &str,
+    role: &str,
+) -> Result<String> {
+    let data = json!({
+        "prompt": body,
+        "task": body,
+        "role": role,
+    });
+
+    handlebars
+        .render_template(template, &data)
+        .with_context(|| format!("Failed to render prompt template for role '{role}'"))
 }
 
 fn parse_subtasks(raw: &str) -> Vec<String> {

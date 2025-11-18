@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
+use handlebars::Handlebars;
 use tracing::{debug, info};
 
 use crate::{
@@ -19,6 +20,7 @@ pub struct FlowRunner {
     config: Arc<MicrofactoryConfig>,
     llm: Option<Arc<dyn LlmClient>>,
     options: RunnerOptions,
+    handlebars: Arc<Handlebars<'static>>,
 }
 
 impl FlowRunner {
@@ -27,10 +29,13 @@ impl FlowRunner {
         llm: Option<Arc<dyn LlmClient>>,
         options: RunnerOptions,
     ) -> Self {
+        let mut handlebars = Handlebars::new();
+        handlebars.set_strict_mode(false); // Allow missing variables for now
         Self {
             config,
             llm,
             options,
+            handlebars: Arc::new(handlebars),
         }
     }
 
@@ -80,6 +85,7 @@ impl FlowRunner {
                         agent,
                         llm.clone(),
                         red_flag_pipeline.clone(),
+                        self.handlebars.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
@@ -101,7 +107,13 @@ impl FlowRunner {
                         .clone();
                     let vote_k =
                         self.resolve_k(AgentKind::DecompositionDiscriminator, &agent, context);
-                    let task = DecompositionVoteTask::new(step_id, agent, llm.clone(), vote_k);
+                    let task = DecompositionVoteTask::new(
+                        step_id,
+                        agent,
+                        llm.clone(),
+                        vote_k,
+                        self.handlebars.clone(),
+                    );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
                         self.handle_next_action(result.action, &current_item, context)
@@ -138,8 +150,13 @@ impl FlowRunner {
                         .get(&AgentKind::Solver)
                         .expect("missing solver agent")
                         .clone();
-                    let task =
-                        SolveTask::new(step_id, agent, llm.clone(), red_flag_pipeline.clone());
+                    let task = SolveTask::new(
+                        step_id,
+                        agent,
+                        llm.clone(),
+                        red_flag_pipeline.clone(),
+                        self.handlebars.clone(),
+                    );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
                         self.handle_next_action(result.action, &current_item, context)
@@ -161,7 +178,13 @@ impl FlowRunner {
                         .expect("missing solution discriminator")
                         .clone();
                     let vote_k = self.resolve_k(AgentKind::SolutionDiscriminator, &agent, context);
-                    let task = SolutionVoteTask::new(step_id, agent, llm.clone(), vote_k);
+                    let task = SolutionVoteTask::new(
+                        step_id,
+                        agent,
+                        llm.clone(),
+                        vote_k,
+                        self.handlebars.clone(),
+                    );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
                         self.handle_next_action(result.action, &current_item, context)

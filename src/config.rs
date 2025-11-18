@@ -233,6 +233,34 @@ fn validate_red_flagger(domain: &str, idx: usize, cfg: &RedFlaggerConfig) -> Res
                 "Domain '{domain}' red_flaggers[{idx}] language must not be blank"
             );
         }
+        "llm_critique" => {
+            let model = cfg
+                .params
+                .get("model")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Domain '{domain}' red_flaggers[{idx}] of type 'llm_critique' must set model"
+                    )
+                })?;
+            ensure!(
+                !model.trim().is_empty(),
+                "Domain '{domain}' red_flaggers[{idx}] model must not be blank"
+            );
+            let prompt_template = cfg
+                .params
+                .get("prompt_template")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Domain '{domain}' red_flaggers[{idx}] of type 'llm_critique' must set prompt_template"
+                    )
+                })?;
+            ensure!(
+                !prompt_template.trim().is_empty(),
+                "Domain '{domain}' red_flaggers[{idx}] prompt_template must not be blank"
+            );
+        }
         other => {
             return Err(anyhow!(
                 "Domain '{domain}' references unknown red flagger type '{other}'"

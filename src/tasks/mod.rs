@@ -593,7 +593,7 @@ impl<'ctx> SampleCollector<'ctx> {
             let before = accepted.len();
             let mut flagged_this_round = 0usize;
             for raw in batch {
-                let matches = self.pipeline.evaluate(&raw);
+                let matches = self.pipeline.evaluate(&raw).await;
                 if matches.is_empty() {
                     accepted.push(raw);
                 } else {
@@ -780,7 +780,7 @@ mod tests {
             kind: "length".into(),
             params: BTreeMap::from([(String::from("max_tokens"), Value::from(2))]),
         }];
-        let pipeline = Arc::new(RedFlagPipeline::from_configs(&configs).unwrap());
+        let pipeline = Arc::new(RedFlagPipeline::from_configs(&configs, None).unwrap());
         let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
             vec!["one two three".into()],
             vec!["one two".into()],

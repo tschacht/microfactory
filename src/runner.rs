@@ -47,7 +47,7 @@ impl FlowRunner {
             .with_context(|| format!("Unknown domain: {}", context.domain))?;
         let agent_configs = self.agent_configs(domain_cfg);
         let red_flag_pipeline = Arc::new(
-            RedFlagPipeline::from_configs(&domain_cfg.red_flaggers)
+            RedFlagPipeline::from_configs(&domain_cfg.red_flaggers, Some(llm.clone()))
                 .context("Failed to build red-flagger pipeline")?,
         );
 

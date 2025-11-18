@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use serde_yaml::Value;
 
 use crate::config::RedFlaggerConfig;
+use crate::llm::LlmClient;
 
 /// Describes a single red-flag incident that caused a sample to be rejected.
 #[derive(Debug, Clone)]
@@ -12,9 +15,10 @@ pub struct RedFlagMatch {
     pub reason: String,
 }
 
+#[async_trait]
 pub trait RedFlagger: Send + Sync {
     fn name(&self) -> &str;
-    fn flag(&self, candidate: &str) -> Option<String>;
+    async fn flag(&self, candidate: &str) -> Result<Option<String>>;
 }
 
 #[derive(Default)]
@@ -23,7 +27,10 @@ pub struct RedFlagPipeline {
 }
 
 impl RedFlagPipeline {
-    pub fn from_configs(configs: &[RedFlaggerConfig]) -> Result<Self> {
+    pub fn from_configs(
+        configs: &[RedFlaggerConfig],
+        llm: Option<Arc<dyn LlmClient>>,
+    ) -> Result<Self> {
         let mut flaggers: Vec<Box<dyn RedFlagger>> = Vec::new();
         for cfg in configs {
             let flagger: Box<dyn RedFlagger> = match cfg.kind.as_str() {
@@ -35,6 +42,18 @@ impl RedFlagPipeline {
                     let language = extract_string(&cfg.params, "language")?;
                     Box::new(SyntaxRedFlagger { language })
                 }
+                "llm_critique" => {
+                    let client = llm
+                        .clone()
+                        .context("LLM client required for llm_critique red flagger")?;
+                    let model = extract_string(&cfg.params, "model")?;
+                    let prompt_template = extract_string(&cfg.params, "prompt_template")?;
+                    Box::new(LlmRedFlagger {
+                        client,
+                        model,
+                        prompt_template,
+                    })
+                }
                 other => {
                     return Err(anyhow!("Unknown red flagger type: {other}"));
                 }
@@ -44,14 +63,24 @@ impl RedFlagPipeline {
         Ok(Self { flaggers })
     }
 
-    pub fn evaluate(&self, candidate: &str) -> Vec<RedFlagMatch> {
+    pub async fn evaluate(&self, candidate: &str) -> Vec<RedFlagMatch> {
         let mut matches = Vec::new();
         for flagger in &self.flaggers {
-            if let Some(reason) = flagger.flag(candidate) {
-                matches.push(RedFlagMatch {
-                    flagger: flagger.name().to_string(),
-                    reason,
-                });
+            match flagger.flag(candidate).await {
+                Ok(Some(reason)) => {
+                    matches.push(RedFlagMatch {
+                        flagger: flagger.name().to_string(),
+                        reason,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        flagger = flagger.name(),
+                        error = ?e,
+                        "Red flagger failed to execute"
+                    );
+                }
             }
         }
         matches
@@ -66,20 +95,21 @@ struct LengthRedFlagger {
     max_tokens: usize,
 }
 
+#[async_trait]
 impl RedFlagger for LengthRedFlagger {
     fn name(&self) -> &str {
         "length"
     }
 
-    fn flag(&self, candidate: &str) -> Option<String> {
+    async fn flag(&self, candidate: &str) -> Result<Option<String>> {
         let tokens = candidate.split_whitespace().count();
         if tokens > self.max_tokens {
-            Some(format!(
+            Ok(Some(format!(
                 "response used {tokens} tokens exceeding limit {}",
                 self.max_tokens
-            ))
+            )))
         } else {
-            None
+            Ok(None)
         }
     }
 }
@@ -88,16 +118,46 @@ struct SyntaxRedFlagger {
     language: String,
 }
 
+#[async_trait]
 impl RedFlagger for SyntaxRedFlagger {
     fn name(&self) -> &str {
         "syntax"
     }
 
-    fn flag(&self, candidate: &str) -> Option<String> {
+    async fn flag(&self, candidate: &str) -> Result<Option<String>> {
         if is_unbalanced(candidate) {
-            Some(format!("{} delimiters appear unbalanced", self.language))
+            Ok(Some(format!(
+                "{} delimiters appear unbalanced",
+                self.language
+            )))
         } else {
-            None
+            Ok(None)
+        }
+    }
+}
+
+struct LlmRedFlagger {
+    client: Arc<dyn LlmClient>,
+    model: String,
+    prompt_template: String,
+}
+
+#[async_trait]
+impl RedFlagger for LlmRedFlagger {
+    fn name(&self) -> &str {
+        "llm_critique"
+    }
+
+    async fn flag(&self, candidate: &str) -> Result<Option<String>> {
+        let prompt = self.prompt_template.replace("{{candidate}}", candidate);
+        let response = self.client.sample(&prompt, Some(&self.model)).await?;
+        let trimmed = response.trim().to_lowercase();
+        // Expecting the LLM to say "yes" if it's bad, or "no" if it's good, or some structured output.
+        // Let's assume the prompt asks "Is this code invalid? Answer YES or NO."
+        if trimmed.starts_with("yes") {
+            Ok(Some(format!("LLM critique flagged content: {}", response)))
+        } else {
+            Ok(None)
         }
     }
 }
@@ -148,30 +208,30 @@ fn extract_string(map: &BTreeMap<String, Value>, key: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn length_flagger_detects_overflow() {
+    #[tokio::test]
+    async fn length_flagger_detects_overflow() {
         let flagger = LengthRedFlagger { max_tokens: 3 };
-        assert!(flagger.flag("one two three four").is_some());
-        assert!(flagger.flag("one two").is_none());
+        assert!(flagger.flag("one two three four").await.unwrap().is_some());
+        assert!(flagger.flag("one two").await.unwrap().is_none());
     }
 
-    #[test]
-    fn syntax_flagger_detects_unbalanced() {
+    #[tokio::test]
+    async fn syntax_flagger_detects_unbalanced() {
         let flagger = SyntaxRedFlagger {
             language: "python".into(),
         };
-        assert!(flagger.flag("def foo(:").is_some());
-        assert!(flagger.flag("def foo(): pass").is_none());
+        assert!(flagger.flag("def foo(:").await.unwrap().is_some());
+        assert!(flagger.flag("def foo(): pass").await.unwrap().is_none());
     }
 
-    #[test]
-    fn pipeline_builds_from_config() {
+    #[tokio::test]
+    async fn pipeline_builds_from_config() {
         let configs = vec![RedFlaggerConfig {
             kind: "length".into(),
             params: BTreeMap::from([(String::from("max_tokens"), Value::from(2))]),
         }];
-        let pipeline = RedFlagPipeline::from_configs(&configs).unwrap();
-        let matches = pipeline.evaluate("one two three");
+        let pipeline = RedFlagPipeline::from_configs(&configs, None).unwrap();
+        let matches = pipeline.evaluate("one two three").await;
         assert_eq!(matches.len(), 1);
     }
 }

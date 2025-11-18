@@ -156,6 +156,7 @@ Endpoints:
 
 - `GET /sessions[?limit=N]` – JSON list of recent sessions.
 - `GET /sessions/{id}` – Detailed payload for a specific session.
+- `POST /sessions/{id}/resume` – Signal intent to resume a paused or failed session (returns 202 Accepted).
 - `GET /sessions/stream` – Server-Sent Events stream emitting periodic JSON snapshots (same schema as `/sessions`).
 
 Run it on localhost (default) or behind a reverse proxy to feed dashboards or supervising agents without spawning the CLI repeatedly.

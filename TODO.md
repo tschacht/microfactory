@@ -14,19 +14,13 @@ Each task should include:
 
 ***
 
-## Pending Tasks
-
-### `TASK-005` [ ] Add Resume Endpoint to HTTP Server
-**Priority**: Medium
+### `TASK-006` [ ] Implement Background Worker for Session Resumption
+**Priority**: High
 **Context**:
-The current `microfactory serve` implementation is read-only. To allow external tools (IDEs, dashboards) to control the workflow, we need an endpoint to resume paused sessions.
+The `POST /sessions/:id/resume` endpoint currently only validates the request but does not actually restart the workflow. To make the API fully functional, we need a mechanism to execute the `FlowRunner` in the background when a resume request is received.
 
 **Implementation Details**:
-1.  **Route**: Add `POST /sessions/:id/resume` to `src/server.rs`.
-2.  **Handler**: Implement a handler that:
-    -   Loads the session from `SessionStore`.
-    -   Validates it is in a paused state.
-    -   (Optional) Accepts a JSON body to override parameters (like `api_key` or `samples`).
-    -   Spawns a background task (or uses a shared runner handle) to resume execution. *Note: This is complex because `FlowRunner` currently runs in the foreground of the CLI process. The server might need to spawn a new process or communicate with a worker.*
-    -   For V1, it might be sufficient to just update the state in SQLite to "Pending" so a separate worker can pick it up, or return a 501 Not Implemented if the architecture doesn't support background resumption yet.
-3.  **Testing**: Add an integration test in `src/server.rs`.
+1.  **Architecture**: Decide on a strategy (e.g., spawning a new thread, using a dedicated worker pool, or shelling out to `microfactory resume`).
+2.  **Worker**: Implement a background task that listens for resume signals (or polls for "Pending Resume" state if we add that status).
+3.  **Integration**: Connect the `resume_session_handler` in `src/server.rs` to trigger this worker.
+4.  **Concurrency**: Ensure the worker can safely access the SQLite database and `FlowRunner` logic without blocking the HTTP server.

@@ -345,13 +345,22 @@ Currently, `FlowRunner` and session management logic are tightly coupled to the 
     *   Spawn a background worker task that consumes session IDs from the queue and uses `SessionManager` to execute them.
     *   This replaces the need to "shell out" to the CLI for background tasks, improving performance and observability.
 
-4.  **Refactor CLI & Server:**
+4. **Refactor CLI & Server:**
+
     *   Update `microfactory run` and `resume` to be thin wrappers around `SessionManager`.
+
     *   Update `POST /sessions/:id/resume` to push the session ID into the job queue instead of returning 501 or shelling out.
 
-**Note:** For the immediate term (TASK-006), the `resume` endpoint may use a simpler "shell out" strategy (executing `microfactory resume` as a subprocess) to provide functionality before this major refactor is undertaken.
+
+
+**Current V1 Behavior (TASK-006):**
+
+The `resume` endpoint currently uses a "shell out" strategy. When `POST /sessions/:id/resume` is called, the server spawns a detached child process executing `microfactory resume --session-id <ID>`. This provides immediate functionality but lacks fine-grained control and observability compared to the planned Phase 8 in-process worker pool.
+
+
 
 ## Implementation Notes
+
 - Start prototyping with a single-task graph.
 - Test with small tasks (e.g., fix one test) before scaling.
 - Inspired by rs-graph-llm (GitHub) for orchestration.

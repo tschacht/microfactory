@@ -115,17 +115,15 @@ impl ServeState {
             ));
         }
 
-        // For V1, we just mark it as Pending so a worker can pick it up.
-        // In a real system, we might signal a channel or spawn a task.
-        // Since FlowRunner is currently CLI-bound, this is a state-only change
-        // that assumes an external watcher or re-run command will handle execution.
-        // However, to be useful for the CLI `resume` command, we don't strictly need
-        // to change state here if the CLI is the one driving it.
-        // But if we want to signal "intent to resume", we could add a new status.
-        // For now, let's just return success if it exists and is resumable,
-        // effectively acknowledging the request.
-        //
-        // TODO: Implement background worker to actually resume execution.
+        let exe = std::env::current_exe().context("Failed to determine current executable path")?;
+
+        info!(session_id, "Spawning background resume process");
+        std::process::Command::new(exe)
+            .arg("resume")
+            .arg("--session-id")
+            .arg(session_id)
+            .spawn()
+            .context("Failed to spawn resume process")?;
 
         Ok(true)
     }

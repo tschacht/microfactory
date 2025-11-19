@@ -423,6 +423,33 @@ impl MicroTask for ApplyVerifyTask {
                     step_id = self.step_id,
                     "Applying solution via built-in patch_file (mock)"
                 );
+            } else if applier_cmd == "overwrite_file" {
+                let target_path = extract_target_path(&step.description);
+                if let Some(path_str) = target_path {
+                    let content = extract_code_content(step.winning_solution.as_ref().unwrap());
+                    let path = std::path::Path::new(&path_str);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    match std::fs::write(path, content) {
+                        Ok(_) => {
+                            info!(step_id = self.step_id, path = %path.display(), "Overwrote file");
+                        }
+                        Err(e) => {
+                            warn!(step_id = self.step_id, path = %path.display(), error = ?e, "Failed to overwrite file");
+                            ctx.mark_step_status(self.step_id, StepStatus::Failed);
+                            return Ok(TaskResult::continue_with(TaskEffect::None));
+                        }
+                    }
+                } else {
+                    warn!(
+                        step_id = self.step_id,
+                        description = %step.description,
+                        "Could not determine target file path from description for overwrite_file"
+                    );
+                    ctx.mark_step_status(self.step_id, StepStatus::Failed);
+                    return Ok(TaskResult::continue_with(TaskEffect::None));
+                }
             } else {
                 info!(
                     step_id = self.step_id,
@@ -758,6 +785,34 @@ fn majority_vote(votes: &[usize]) -> Option<usize> {
     Some(leader)
 }
 
+fn extract_target_path(description: &str) -> Option<String> {
+    // Heuristic: find first token that looks like a file path
+    for token in description.split_whitespace() {
+        let clean = token.trim_matches(|c| {
+            c == '(' || c == ')' || c == ':' || c == ',' || c == '\'' || c == '"'
+        });
+        if (clean.contains('.') || clean.contains('/')) && !clean.ends_with('.') {
+            return Some(clean.to_string());
+        }
+    }
+    None
+}
+
+fn extract_code_content(raw: &str) -> String {
+    if let Some(start) = raw.find("```") {
+        let rest = &raw[start + 3..];
+        if let Some(end) = rest.find("```") {
+            let code_block = &rest[..end];
+            // skip language identifier line if present
+            if let Some(newline) = code_block.find('\n') {
+                return code_block[newline + 1..].to_string();
+            }
+            return code_block.to_string();
+        }
+    }
+    raw.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,6 +845,35 @@ mod tests {
     fn majority_vote_falls_back() {
         let votes = vec![1, 2, 2, 1, 2];
         assert_eq!(majority_vote(&votes), Some(2));
+    }
+
+    #[test]
+    fn extracts_target_path_from_description() {
+        assert_eq!(
+            extract_target_path("Create file src/main.rs"),
+            Some("src/main.rs".to_string())
+        );
+        assert_eq!(
+            extract_target_path("Update config.yaml with..."),
+            Some("config.yaml".to_string())
+        );
+        assert_eq!(extract_target_path("Refactor the login logic"), None);
+        assert_eq!(
+            extract_target_path("Check (src/lib.rs)"),
+            Some("src/lib.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_code_content_from_markdown() {
+        let raw = "Here is the code:\n```rust\nfn main() {}\n```\nEnjoy.";
+        assert_eq!(extract_code_content(raw), "fn main() {}\n");
+
+        let raw_no_lang = "```\nplain text\n```";
+        assert_eq!(extract_code_content(raw_no_lang), "plain text\n");
+
+        let raw_plain = "Just text";
+        assert_eq!(extract_code_content(raw_plain), "Just text");
     }
 
     #[tokio::test]

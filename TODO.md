@@ -52,7 +52,7 @@ Each task should include:
     - Handle parsing of code blocks from the LLM response.
 
 ### TASK-005: Simple Overwrite File Applier
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Priority**: Medium
 - **Context**: Simplified alternative to TASK-004. Instead of complex patching, implement a "dumb" applier that overwrites files with the full content provided by the agent. Useful for initial file creation tasks.
 - **Implementation Details**:

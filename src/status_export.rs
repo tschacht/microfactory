@@ -50,6 +50,8 @@ pub struct SessionDetailExport {
     pub domain: String,
     pub updated_at: i64,
     pub wait_state: Option<WaitState>,
+    pub pending_decompositions: Option<Vec<crate::context::DecompositionProposal>>,
+    pub pending_solutions: Option<Vec<String>>,
     pub metadata: SessionMetadata,
     pub completed_steps: usize,
     pub total_steps: usize,
@@ -59,6 +61,18 @@ pub struct SessionDetailExport {
 impl SessionDetailExport {
     pub fn from_record(record: &SessionRecord) -> Self {
         let context = &record.envelope.context;
+
+        let mut pending_proposals = None;
+        let mut pending_solutions = None;
+        if let Some(wait) = &context.wait_state {
+            if let Some(props) = context.pending_decompositions.get(&wait.step_id) {
+                pending_proposals = Some(props.clone());
+            }
+            if let Some(sols) = context.pending_solutions.get(&wait.step_id) {
+                pending_solutions = Some(sols.clone());
+            }
+        }
+
         Self {
             session_id: context.session_id.clone(),
             status: record.status.as_str().to_string(),
@@ -66,12 +80,20 @@ impl SessionDetailExport {
             domain: context.domain.clone(),
             updated_at: record.updated_at,
             wait_state: context.wait_state.clone(),
+            pending_decompositions: pending_proposals,
+            pending_solutions,
             metadata: record.envelope.metadata.clone(),
             completed_steps: count_completed_steps(context),
             total_steps: context.steps.len(),
             metrics: context.metrics.clone(),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PendingProposals {
+    pub step_id: usize,
+    pub proposals: Vec<crate::context::DecompositionProposal>,
 }
 
 pub fn count_completed_steps(ctx: &Context) -> usize {

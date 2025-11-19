@@ -6,6 +6,7 @@
 - `docs/` hosts architecture notes, the user guide, and research context; sync this folder when behavior changes.
 - `integration-tests/` is a standalone crate that exercises CLI flows end-to-end; fixture data lives under `integration-tests/tests`.
 - `scripts/` bundles helper bash wrappers (tests, cleanup) that the Makefile invokes.
+- `TODO.md` tracks technical debt and planned features (e.g., per-agent red-flaggers). Refer to this file before starting new features or refactors.
 
 ## Build, Test, and Development Commands
 - `make build` (or `cargo build --workspace`) compiles every crate.
@@ -33,7 +34,8 @@
 - Gate new features with at least one regression test plus coverage for failure paths (e.g., invalid config, SQLite errors).
 
 ## Commit & Pull Request Guidelines
-- NEVER commit changes with git or do any desructive operations with git. this is only manged by the human.
+- NEVER commit, stage changes or do any destructive operations with git (e.g. no touching the staging area, no reset index etc.). this is only manged by the human.
+- also do not ask to do any state-changing or destructive operations via git.
 - non-destructive and non-state-changing reading opertions via git are allowed.
 - create new branches or PRs only when explicitly prompted.
 - suggest imperative, ≤72-character commit subjects ("Add adaptive k flag"), followed by focused bodies that explain intent + verification.

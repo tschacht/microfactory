@@ -3,30 +3,28 @@ domains:
     agents:
       decomposition:
         prompt_template: "templates/code_decompose.hbs"
-        model: "gpt-5.1-codex"
+        model: "gpt-4o-mini"
         samples: 3
       decomposition_discriminator:
         prompt_template: "templates/code_decompose_vote.hbs"
-        model: "gpt-5.1-codex-mini"
+        model: "gpt-4o-mini"
         k: 3
       solver:
         prompt_template: "templates/code_solve_step.hbs"
-        model: "gpt-5.1-codex"
+        model: "gpt-4o-mini"
         samples: 10
       solution_discriminator:
         prompt_template: "templates/code_solution_vote.hbs"
-        model: "gpt-5.1-codex-mini"
+        model: "gpt-4o-mini"
         k: 3
     step_granularity:
       max_files: 1
       max_lines_changed: 20
-    verifier: "pytest -v"
+    verifier: "cargo check"
     applier: "patch_file"
     red_flaggers:
       - type: "length"
         max_tokens: 2048
-      - type: "syntax"
-        language: "python"
   analysis:
     agents:
       decomposition:

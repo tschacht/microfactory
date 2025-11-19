@@ -16,4 +16,45 @@ Each task should include:
 
 ## Pending Tasks
 
-*(No pending tasks)*
+### TASK-001: Per-Agent Red-Flagger Configuration
+- **Status**: `[ ]`
+- **Priority**: High
+- **Context**: Currently, `red_flaggers` are defined globally for a domain. This causes issues where "syntax" checks (meant for code generation) run against Decomposition agents (which output text plans), leading to false positives and wasted tokens.
+- **Implementation Details**:
+    - Update `src/config.rs` to allow `red_flaggers` to be defined inside the `agents` block (e.g., specifically for `solver`).
+    - Update `src/runner.rs` or `src/tasks/mod.rs` to load the correct pipeline for the specific task type.
+
+### TASK-002: Persist Candidate Proposals in Context
+- **Status**: `[ ]`
+- **Priority**: Medium
+- **Context**: When a session pauses due to low voting margins, the user needs to see the conflicting proposals to make a decision. Currently, `DecompositionVoteTask` consumes (removes) proposals from the context, leaving the `status --json` output empty of this critical data.
+- **Implementation Details**:
+    - Update `Context` struct to retain `decomposition_candidates` and `solution_candidates` in the `WorkflowStep` struct (or a separate history map) instead of removing them.
+    - Update `status_export.rs` to include these candidates in the session details JSON.
+    - Ensure `persistence.rs` serializes/deserializes this history correctly.
+
+### TASK-003: Investigate rig-core GPT-5 Support
+- **Status**: `[ ]`
+- **Priority**: High
+- **Context**: During the "Phase 8 Shakedown", `gpt-5-mini` caused a panic in `rig-core` (`ToolDefinitions([])`) and `gpt-5.1` caused `JsonError: unknown variant none` for reasoning effort. We reverted to `gpt-4o`/`gpt-4o-mini` to proceed.
+- **Implementation Details**:
+    - Investigate `rig-core` v0.24.0 compatibility with GPT-5 models.
+    - Determine if the `none` reasoning variant is supported or requires a library update/fork.
+    - Debug the `ToolDefinitions` panic—is it caused by Microfactory failing to initialize tools, or a library bug when tools are unused?
+    - Goal: Enable `gpt-5-mini` usage safely.
+
+### TASK-004: Implement Real Applier Logic
+- **Status**: `[ ]`
+- **Priority**: High
+- **Context**: The "Shakedown" revealed that `ApplyVerifyTask` uses a mock log-only applier for `patch_file`. No code is actually written to disk.
+- **Implementation Details**:
+    - Implement a real `patch_file` function (or similar) that takes the LLM's output (diff or full file) and applies it to the filesystem.
+    - Handle parsing of code blocks from the LLM response.
+
+### TASK-005: Simple Overwrite File Applier
+- **Status**: `[ ]`
+- **Priority**: Medium
+- **Context**: Simplified alternative to TASK-004. Instead of complex patching, implement a "dumb" applier that overwrites files with the full content provided by the agent. Useful for initial file creation tasks.
+- **Implementation Details**:
+    - Add a new applier type `overwrite_file` in `config.yaml` and `runner.rs`.
+    - Logic: Extract the first code block from the solution and write it to the target path (if the step context or prompt implies a filename).

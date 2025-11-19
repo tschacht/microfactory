@@ -426,17 +426,31 @@ impl MicroTask for ApplyVerifyTask {
             } else if applier_cmd == "overwrite_file" {
                 let target_path = extract_target_path(&step.description);
                 if let Some(path_str) = target_path {
-                    let content = extract_code_content(step.winning_solution.as_ref().unwrap());
-                    let path = std::path::Path::new(&path_str);
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-                    match std::fs::write(path, content) {
-                        Ok(_) => {
-                            info!(step_id = self.step_id, path = %path.display(), "Overwrote file");
+                    match validate_target_path(&path_str) {
+                        Ok(safe_path) => {
+                            let content =
+                                extract_code_content(step.winning_solution.as_ref().unwrap());
+                            if let Some(parent) = safe_path.parent() {
+                                std::fs::create_dir_all(parent).ok();
+                            }
+                            match std::fs::write(&safe_path, content) {
+                                Ok(_) => {
+                                    info!(step_id = self.step_id, path = %safe_path.display(), "Overwrote file");
+                                }
+                                Err(e) => {
+                                    warn!(step_id = self.step_id, path = %safe_path.display(), error = ?e, "Failed to overwrite file");
+                                    ctx.mark_step_status(self.step_id, StepStatus::Failed);
+                                    return Ok(TaskResult::continue_with(TaskEffect::None));
+                                }
+                            }
                         }
                         Err(e) => {
-                            warn!(step_id = self.step_id, path = %path.display(), error = ?e, "Failed to overwrite file");
+                            warn!(
+                                step_id = self.step_id,
+                                path = %path_str,
+                                error = ?e,
+                                "Target path failed safety validation"
+                            );
                             ctx.mark_step_status(self.step_id, StepStatus::Failed);
                             return Ok(TaskResult::continue_with(TaskEffect::None));
                         }
@@ -785,6 +799,38 @@ fn majority_vote(votes: &[usize]) -> Option<usize> {
     Some(leader)
 }
 
+fn validate_target_path(raw: &str) -> Result<std::path::PathBuf> {
+    let path = std::path::Path::new(raw);
+
+    // 1. Must be relative
+    if path.is_absolute() {
+        return Err(anyhow!("Absolute paths are forbidden: {}", raw));
+    }
+
+    // 2. Must not contain traversal (..)
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err(anyhow!("Path traversal (..) is forbidden: {}", raw));
+            }
+            std::path::Component::Normal(os_str) => {
+                if os_str == ".git" {
+                    return Err(anyhow!("Modifying .git directory is forbidden: {}", raw));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 3. Check for .git in path string too (to catch hidden .git inside filenames if OS allows)
+    // Just standard component check above covers `.git` folder, but let's be safe.
+    if raw.contains("/.git/") || raw.starts_with(".git/") || raw == ".git" {
+        return Err(anyhow!("Modifying .git directory is forbidden: {}", raw));
+    }
+
+    Ok(path.to_path_buf())
+}
+
 fn extract_target_path(description: &str) -> Option<String> {
     // Heuristic: find first token that looks like a file path
     for token in description.split_whitespace() {
@@ -874,6 +920,19 @@ mod tests {
 
         let raw_plain = "Just text";
         assert_eq!(extract_code_content(raw_plain), "Just text");
+    }
+
+    #[test]
+    fn validation_rejects_unsafe_paths() {
+        assert!(validate_target_path("/etc/passwd").is_err());
+        assert!(validate_target_path("../outside").is_err());
+        assert!(validate_target_path("src/../../oops").is_err());
+        assert!(validate_target_path(".git/config").is_err());
+        assert!(validate_target_path("src/.git/info").is_err());
+
+        assert!(validate_target_path("src/main.rs").is_ok());
+        assert!(validate_target_path("README.md").is_ok());
+        assert!(validate_target_path("nested/deep/file.rs").is_ok());
     }
 
     #[tokio::test]

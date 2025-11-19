@@ -91,6 +91,9 @@ impl Context {
         step_id: usize,
         proposals: Vec<DecompositionProposal>,
     ) {
+        if let Some(step) = self.step_mut(step_id) {
+            step.candidate_decompositions = proposals.clone();
+        }
         self.pending_decompositions.insert(step_id, proposals);
         self.metrics.decomposition_runs += 1;
     }
@@ -185,6 +188,8 @@ pub struct WorkflowStep {
     pub status: StepStatus,
     pub children: Vec<usize>,
     pub candidate_solutions: Vec<String>,
+    #[serde(default)]
+    pub candidate_decompositions: Vec<DecompositionProposal>,
     pub winning_solution: Option<String>,
 }
 
@@ -198,6 +203,7 @@ impl WorkflowStep {
             status: StepStatus::Pending,
             children: Vec::new(),
             candidate_solutions: Vec::new(),
+            candidate_decompositions: Vec::new(),
             winning_solution: None,
         }
     }
@@ -371,4 +377,39 @@ pub struct WaitState {
     pub step_id: usize,
     pub trigger: String,
     pub details: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_candidate_persistence() {
+        let mut ctx = Context::new("test prompt", "code");
+        let step_id = ctx.root_step_id().unwrap();
+
+        let proposals = vec![
+            DecompositionProposal::new(0, "prop1".into(), vec!["task A".into()]),
+            DecompositionProposal::new(1, "prop2".into(), vec!["task B".into()]),
+        ];
+
+        // 1. Register decomposition
+        ctx.register_decomposition(step_id, proposals.clone());
+
+        // 2. Verify it's in the step
+        let step = ctx.step(step_id).expect("step exists");
+        assert_eq!(step.candidate_decompositions.len(), 2);
+        assert_eq!(step.candidate_decompositions[0].raw, "prop1");
+
+        // 3. Verify it's in pending map
+        assert!(ctx.pending_decompositions.contains_key(&step_id));
+
+        // 4. Verify serialization/deserialization
+        let serialized = serde_json::to_string(&ctx).expect("serialize");
+        let deserialized: Context = serde_json::from_str(&serialized).expect("deserialize");
+        let d_step = deserialized.step(step_id).expect("step exists");
+
+        assert_eq!(d_step.candidate_decompositions.len(), 2);
+        assert_eq!(d_step.candidate_decompositions[1].raw, "prop2");
+    }
 }

@@ -25,7 +25,7 @@ Each task should include:
     - Update `src/runner.rs` or `src/tasks/mod.rs` to load the correct pipeline for the specific task type.
 
 ### TASK-002: Persist Candidate Proposals in Context
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Priority**: Medium
 - **Context**: When a session pauses due to low voting margins, the user needs to see the conflicting proposals to make a decision. Currently, `DecompositionVoteTask` consumes (removes) proposals from the context, leaving the `status --json` output empty of this critical data.
 - **Implementation Details**:

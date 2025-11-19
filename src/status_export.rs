@@ -55,6 +55,7 @@ pub struct SessionDetailExport {
     pub metadata: SessionMetadata,
     pub completed_steps: usize,
     pub total_steps: usize,
+    pub steps: Vec<crate::context::WorkflowStep>,
     pub metrics: WorkflowMetrics,
 }
 
@@ -85,6 +86,7 @@ impl SessionDetailExport {
             metadata: record.envelope.metadata.clone(),
             completed_steps: count_completed_steps(context),
             total_steps: context.steps.len(),
+            steps: context.steps.clone(),
             metrics: context.metrics.clone(),
         }
     }

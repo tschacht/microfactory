@@ -76,11 +76,17 @@ pub struct RunArgs {
     #[arg(long, help = "Repository path or domain-specific working directory")]
     pub repo_path: Option<PathBuf>,
 
-    #[arg(long, help = "Dry-run mode that avoids applying changes")]
+    #[arg(long, help = "Skips persistence and runs a single probe for testing.")]
     pub dry_run: bool,
+
+    #[arg(
+        long,
+        help = "Pauses execution after decomposition and after each step completion."
+    )]
+    pub step_by_step: bool,
 }
 
-#[derive(Debug, Args, Clone)]
+#[derive(Args, Debug)]
 pub struct StatusArgs {
     #[arg(long, help = "Optional session identifier to inspect")]
     pub session_id: Option<String>,

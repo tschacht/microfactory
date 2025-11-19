@@ -16,6 +16,18 @@ Each task should include:
 
 ## Pending Tasks
 
+### TASK-006: Step-by-Step Execution Mode (Debugger)
+- **Status**: `[x]`
+- **Priority**: High
+- **Context**: Users need a way to verify intermediate steps during complex tasks without racing against the agent (e.g., for shakedown tests or debugging).
+- **Implementation Details**:
+    - Add `--step-by-step` flag to `microfactory run`.
+    - Update `RunnerOptions` to carry this boolean.
+    - In `FlowRunner::execute`, trigger a `WaitState` at two checkpoints if enabled:
+        1. **Post-Decomposition**: After subtasks are generated but before they are executed.
+        2. **Post-Execution**: After `ApplyVerifyTask` completes (step done) but before the next step starts.
+    - Ensure `WaitState` details clearly indicate this is a "step-by-step breakpoint".
+
 ### TASK-001: Per-Agent Red-Flagger Configuration
 - **Status**: `[x]`
 - **Priority**: High

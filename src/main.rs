@@ -59,7 +59,8 @@ async fn run_command(args: RunArgs) -> Result<()> {
         args.max_concurrent_llm,
         resolve_api_key(args.api_key.clone(), args.llm_provider)?,
     )?);
-    let runner_options = RunnerOptions::from_cli(args.samples, args.k, args.adaptive_k);
+    let runner_options =
+        RunnerOptions::from_cli(args.samples, args.k, args.adaptive_k, args.step_by_step);
     let mut context = Context::new(&args.prompt, &args.domain);
     context.session_id = new_session_id();
     context.dry_run = args.dry_run;
@@ -223,7 +224,7 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
         max_concurrent,
         api_key,
     )?);
-    let runner_options = RunnerOptions::from_cli(samples, k, adaptive);
+    let runner_options = RunnerOptions::from_cli(samples, k, adaptive, false);
 
     let metadata = SessionMetadata {
         config_path: config_path.to_string_lossy().to_string(),
@@ -300,7 +301,7 @@ async fn subprocess_command(args: SubprocessArgs) -> Result<()> {
     context.enqueue_work(WorkItem::Solve { step_id: root_id });
     context.enqueue_work(WorkItem::SolutionVote { step_id: root_id });
 
-    let runner_options = RunnerOptions::from_cli(args.samples, args.k, false);
+    let runner_options = RunnerOptions::from_cli(args.samples, args.k, false, false);
     let runner = FlowRunner::new(config, Some(llm_client), runner_options);
     match runner.execute(&mut context).await? {
         RunnerOutcome::Completed => {
@@ -780,6 +781,7 @@ mod tests {
             max_concurrent_llm: 1,
             repo_path: None,
             dry_run: true,
+            step_by_step: false,
         };
 
         let client: Arc<dyn LlmClient> = Arc::new(FailingClient);

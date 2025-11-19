@@ -41,6 +41,7 @@ impl FlowRunner {
 
     /// Executes pending work items stored in the context until completion or a human-in-loop pause.
     pub async fn execute(&self, context: &mut Context) -> Result<RunnerOutcome> {
+        println!("Execute called. Queue len: {}", context.work_queue.len());
         let llm = self
             .llm
             .clone()
@@ -60,7 +61,12 @@ impl FlowRunner {
 
         if !context.has_pending_work()
             && let Some(root) = context.root_step_id()
+            && context
+                .step(root)
+                .map(|s| matches!(s.status, StepStatus::Pending))
+                .unwrap_or(false)
         {
+            println!("Kickstarting decomposition for root step {}", root);
             context.enqueue_work(WorkItem::Decomposition { step_id: root });
         }
 
@@ -151,6 +157,20 @@ impl FlowRunner {
                             }
                         }
                     }
+
+                    if self.options.step_by_step {
+                        let wait = WaitState {
+                            step_id,
+                            trigger: "step_by_step_checkpoint".into(),
+                            details: "Decomposition plan ready for review".into(),
+                        };
+                        context.set_checkpoint(
+                            wait.step_id,
+                            wait.trigger.clone(),
+                            wait.details.clone(),
+                        );
+                        return Ok(RunnerOutcome::Paused(wait));
+                    }
                 }
                 WorkItem::Solve { step_id } => {
                     let agent = agent_configs
@@ -232,6 +252,21 @@ impl FlowRunner {
                         && let Some(step) = context.step(step_id)
                     {
                         info!(step_id, %step.description, "Step completed");
+                        if self.options.step_by_step {
+                            let wait = WaitState {
+                                step_id,
+                                trigger: "step_by_step_checkpoint".into(),
+                                details:
+                                    "Step finished execution. Resume to process next pending work."
+                                        .into(),
+                            };
+                            context.set_checkpoint(
+                                wait.step_id,
+                                wait.trigger.clone(),
+                                wait.details.clone(),
+                            );
+                            return Ok(RunnerOutcome::Paused(wait));
+                        }
                     }
                 }
             }
@@ -447,10 +482,11 @@ pub struct RunnerOptions {
     pub human_red_flag_threshold: usize,
     pub human_resample_threshold: usize,
     pub human_low_margin_threshold: usize,
+    pub step_by_step: bool,
 }
 
 impl RunnerOptions {
-    pub fn from_cli(samples: usize, k: usize, adaptive_k: bool) -> Self {
+    pub fn from_cli(samples: usize, k: usize, adaptive_k: bool, step_by_step: bool) -> Self {
         Self {
             default_samples: samples.max(1),
             default_k: k.max(1),
@@ -460,6 +496,7 @@ impl RunnerOptions {
             human_red_flag_threshold: 4,
             human_resample_threshold: 4,
             human_low_margin_threshold: 1,
+            step_by_step,
         }
     }
 }
@@ -475,6 +512,7 @@ impl Default for RunnerOptions {
             human_red_flag_threshold: 4,
             human_resample_threshold: 4,
             human_low_margin_threshold: 1,
+            step_by_step: false,
         }
     }
 }
@@ -511,6 +549,7 @@ mod tests {
         }
 
         async fn sample_n(&self, _: &str, n: usize, _: Option<&str>) -> Result<Vec<String>> {
+            println!("Requesting {} samples from scripted LLM", n);
             let mut guard = self.batches.lock().unwrap();
             let batch = guard.pop_front().expect("no scripted responses left");
             if batch.len() == n {
@@ -570,6 +609,7 @@ mod tests {
             human_red_flag_threshold: 5,
             human_resample_threshold: 5,
             human_low_margin_threshold: 1,
+            step_by_step: false,
         };
 
         let runner = FlowRunner::new(config, Some(llm), options);
@@ -732,5 +772,83 @@ mod tests {
                 outcome
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn pauses_at_checkpoints_when_step_by_step_enabled() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+
+        // Setup minimal config
+        let yaml = r#"
+        domains:
+          step_check:
+            agents:
+              decomposition:
+                prompt_template: "d"
+                model: "m"
+              decomposition_discriminator:
+                prompt_template: "dv"
+                model: "m"
+              solver:
+                prompt_template: "s"
+                model: "m"
+              solution_discriminator:
+                prompt_template: "sv"
+                model: "m"
+            applier: "patch_file"
+        "#;
+        let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml).unwrap());
+
+        // We expect:
+        // 1. Decomposition (1 sample) -> Pause (Checkpoint 1)
+        // 2. Resume -> Solving -> Voting -> Apply -> Pause (Checkpoint 2)
+        let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
+            vec!["- task".into()], // decomposition
+            vec!["1".into()],      // decomposition vote
+            vec!["sol".into()],    // solve
+            vec!["1".into()],      // solution vote
+        ]));
+
+        let mut context = Context::new("Test Stepping", "step_check");
+        let options = RunnerOptions {
+            step_by_step: true,
+            default_samples: 1,
+            default_k: 1,
+            human_low_margin_threshold: 0,
+            ..RunnerOptions::default()
+        };
+        let runner = FlowRunner::new(config, Some(llm), options);
+
+        // 1. First run: Should reach Decomposition Vote and then Pause
+        let outcome1 = runner.execute(&mut context).await.unwrap();
+        match outcome1 {
+            RunnerOutcome::Paused(wait) => {
+                assert_eq!(wait.trigger, "step_by_step_checkpoint");
+                assert!(wait.details.contains("Decomposition plan ready"));
+            }
+            _ => panic!(
+                "Expected first pause at decomposition checkpoint, got {:?}",
+                outcome1
+            ),
+        }
+        context.clear_wait_state();
+
+        // 2. Resume: Should execute Solve -> Solution Vote -> Apply -> Pause
+        let outcome2 = runner.execute(&mut context).await.unwrap();
+        match outcome2 {
+            RunnerOutcome::Paused(wait) => {
+                assert_eq!(wait.trigger, "step_by_step_checkpoint");
+                assert!(wait.details.contains("Step finished execution"));
+            }
+            _ => panic!(
+                "Expected second pause at step completion checkpoint, got {:?}",
+                outcome2
+            ),
+        }
+        context.clear_wait_state();
+
+        // 3. Resume: Should see no more work and complete
+        let outcome3 = runner.execute(&mut context).await.unwrap();
+        assert!(matches!(outcome3, RunnerOutcome::Completed));
     }
 }

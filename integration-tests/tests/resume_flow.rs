@@ -96,6 +96,7 @@ async fn runner_pauses_and_resumes_after_low_margin_vote() -> Result<()> {
         human_red_flag_threshold: usize::MAX,
         human_resample_threshold: usize::MAX,
         human_low_margin_threshold: 1,
+        step_by_step: false,
     };
 
     let runner = FlowRunner::new(config, Some(llm), options);

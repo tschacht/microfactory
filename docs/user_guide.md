@@ -13,6 +13,7 @@ Microfactory treats complex work (e.g., "fix the test suite" or "summarize quart
 - **Safety features:** Configurable red-flag pipeline (length, syntax, etc.), adaptive voting margins, and human-in-loop pauses when disagreements stack up.
 - **Persistence:** Automatically checkpoints state to SQLite so runs can be resumed or inspected later.
 - **CLI + JSON observability:** `microfactory status --json` surfaces machine-readable session summaries for dashboards or supervising agents.
+- **Step-by-Step Debugger:** Pause execution after critical phases (decomposition, step completion) to verify plans and file changes manually.
 
 ## 2. Research Roots and Design Principles
 
@@ -119,10 +120,17 @@ microfactory run \
   --llm-provider openai \
   --llm-model gpt-5.1-codex \
   --samples 8 --k 3 --adaptive-k \
-  --max-concurrent-llm 4
+  --max-concurrent-llm 4 \
+  --step-by-step
 ```
 
 Options include `--repo-path`, `--dry-run` (single model probe), and `--max-concurrent-llm` for rate limiting. Runs create a UUID session, enqueue decomposition work, and persist progress to `~/.microfactory/sessions.sqlite3`.
+
+**Step-by-Step Mode:**
+Pass `--step-by-step` to force the runner to pause at critical checkpoints:
+1. **Post-Decomposition:** Inspect the subtasks planned by the agent before any code is written.
+2. **Post-Execution:** Inspect the changes applied to the filesystem after each step finishes.
+Use `microfactory resume --session-id <UUID>` to proceed to the next phase.
 
 ### 7.2 `microfactory status`
 
@@ -167,10 +175,12 @@ For each step:
 
 1. **Decomposition (`AgentKind::Decomposition`):** Renders the template with the step description, samples multiple decompositions, and stores proposals.
 2. **Decomposition vote:** The discriminator compares proposals via first-to-ahead-by-*k*; ties fall back to majority.
-3. **Solve:** Solver agents generate concrete patches/plans. Responses pass through the `RedFlagPipeline`; flagged samples trigger resampling (budgeted per runner options).
-4. **Solution vote:** Discriminator picks the winning candidate; metrics record vote margin, duration, sample counts.
-5. **Apply / verify (domain-specific):** The runner executes the configured `applier` (e.g., `patch_file`) and `verifier` (e.g., `pytest`) commands. If verification fails, the step is marked as failed; otherwise, it completes.
-6. **Human pause (optional):** If resample counts, red-flag incidents, or vote margins cross thresholds, the runner records a `WaitState` and returns `RunnerOutcome::Paused` so you can inspect before resuming.
+3. **Checkpoint (if `--step-by-step`):** Pause here to review the plan.
+4. **Solve:** Solver agents generate concrete patches/plans. Responses pass through the `RedFlagPipeline`; flagged samples trigger resampling (budgeted per runner options).
+5. **Solution vote:** Discriminator picks the winning candidate; metrics record vote margin, duration, sample counts.
+6. **Apply / verify (domain-specific):** The runner executes the configured `applier` (e.g., `patch_file`) and `verifier` (e.g., `pytest`) commands. If verification fails, the step is marked as failed; otherwise, it completes.
+7. **Checkpoint (if `--step-by-step`):** Pause here to review file changes.
+8. **Human pause (optional):** If resample counts, red-flag incidents, or vote margins cross thresholds, the runner records a `WaitState` and returns `RunnerOutcome::Paused` so you can inspect before resuming.
 
 ## 9. Persistence & Observability
 
@@ -185,6 +195,7 @@ Triggers (configurable in `RunnerOptions`) include:
 - `human_red_flag_threshold` (default 4 incidents per step)
 - `human_resample_threshold` (default 4 resamples)
 - `human_low_margin_threshold` (default vote margin ≤ 1)
+- `step_by_step_checkpoint` (when `--step-by-step` is active)
 
 When triggered, Microfactory:
 

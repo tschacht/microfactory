@@ -170,6 +170,20 @@ impl Context {
         self.mark_step_status(step_id, StepStatus::WaitingOnInput);
     }
 
+    pub fn set_checkpoint(
+        &mut self,
+        step_id: usize,
+        trigger: impl Into<String>,
+        details: impl Into<String>,
+    ) {
+        self.wait_state = Some(WaitState {
+            step_id,
+            trigger: trigger.into(),
+            details: details.into(),
+        });
+        // Do not change step status
+    }
+
     fn create_step(&mut self, description: String, parent: Option<usize>, depth: usize) -> usize {
         let id = self.next_step_id;
         self.next_step_id += 1;

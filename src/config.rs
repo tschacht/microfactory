@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -134,6 +134,8 @@ pub struct AgentDefinition {
     pub samples: Option<usize>,
     #[serde(default)]
     pub k: Option<usize>,
+    #[serde(default)]
+    pub red_flaggers: Option<Vec<RedFlaggerConfig>>,
 }
 
 impl AgentDefinition {
@@ -162,6 +164,12 @@ impl AgentDefinition {
         }
         if let Some(k) = self.k {
             ensure!(k > 0, "Domain '{domain}' role '{role}' k must be > 0");
+        }
+        if let Some(flaggers) = &self.red_flaggers {
+            for (idx, flagger) in flaggers.iter().enumerate() {
+                validate_red_flagger(domain, idx, flagger)
+                    .with_context(|| format!("Invalid red_flagger for role '{role}'"))?;
+            }
         }
         Ok(())
     }
@@ -193,7 +201,7 @@ impl StepGranularity {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RedFlaggerConfig {
     #[serde(rename = "type")]
     pub kind: String,

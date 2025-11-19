@@ -318,6 +318,7 @@ pub struct AgentConfig {
     pub model: String,
     pub samples: usize,
     pub k: Option<usize>,
+    pub red_flaggers: Option<Vec<crate::config::RedFlaggerConfig>>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

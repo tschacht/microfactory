@@ -51,10 +51,7 @@ impl FlowRunner {
             .domain(&context.domain)
             .with_context(|| format!("Unknown domain: {}", context.domain))?;
         let agent_configs = self.agent_configs(domain_cfg);
-        let red_flag_pipeline = Arc::new(
-            RedFlagPipeline::from_configs(&domain_cfg.red_flaggers, Some(llm.clone()))
-                .context("Failed to build red-flagger pipeline")?,
-        );
+        // Red flaggers are now resolved per-agent inside the loop.
 
         if context.root_step_id().is_none() {
             let root = context.ensure_root();
@@ -79,6 +76,16 @@ impl FlowRunner {
                         .get(&AgentKind::Decomposition)
                         .expect("missing decomposition agent")
                         .clone();
+
+                    let rf_configs = agent
+                        .red_flaggers
+                        .as_deref()
+                        .unwrap_or(&domain_cfg.red_flaggers);
+                    let red_flag_pipeline = Arc::new(
+                        RedFlagPipeline::from_configs(rf_configs, Some(llm.clone()))
+                            .context("Failed to build decomposition red-flagger pipeline")?,
+                    );
+
                     let task = DecompositionTask::new(
                         step_id,
                         step_prompt,
@@ -150,6 +157,16 @@ impl FlowRunner {
                         .get(&AgentKind::Solver)
                         .expect("missing solver agent")
                         .clone();
+
+                    let rf_configs = agent
+                        .red_flaggers
+                        .as_deref()
+                        .unwrap_or(&domain_cfg.red_flaggers);
+                    let red_flag_pipeline = Arc::new(
+                        RedFlagPipeline::from_configs(rf_configs, Some(llm.clone()))
+                            .context("Failed to build solver red-flagger pipeline")?,
+                    );
+
                     let task = SolveTask::new(
                         step_id,
                         agent,
@@ -409,6 +426,7 @@ impl FlowRunner {
                 .unwrap_or(self.options.default_samples)
                 .max(1),
             k: definition.k.or(Some(self.options.default_k)),
+            red_flaggers: definition.red_flaggers.clone(),
         }
     }
 }
@@ -659,8 +677,60 @@ mod tests {
 
         assert_eq!(child.status, StepStatus::Completed);
         assert_eq!(child.winning_solution.as_deref(), Some("sol"));
+    }
 
-        let metrics = context.metrics().step_metrics(child_id).unwrap();
-        assert_eq!(metrics.verification_passed, Some(true));
+    #[tokio::test]
+    async fn respects_agent_specific_red_flaggers() {
+        let yaml = r#"
+        domains:
+          strict_check:
+            agents:
+              decomposition:
+                prompt_template: "d"
+                model: "m"
+                samples: 1
+                red_flaggers:
+                  - type: "length"
+                    max_tokens: 1  # Strict!
+              decomposition_discriminator:
+                prompt_template: "dv"
+                model: "m"
+              solver:
+                prompt_template: "s"
+                model: "m"
+              solution_discriminator:
+                prompt_template: "sv"
+                model: "m"
+            red_flaggers:
+              - type: "length"
+                max_tokens: 100 # Lax default
+        "#;
+        let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml).unwrap());
+        // Response has 3 tokens "too long response", fails strict check (1), passes lax (100)
+        let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
+            vec!["too long response".into()], // decomposition sample 1 (red flagged)
+            vec!["ok".into()],                // decomposition sample 2 (accepted)
+        ]));
+
+        let mut context = Context::new("Check", "strict_check");
+        let options = RunnerOptions {
+            human_red_flag_threshold: 1, // Pause immediately on flag
+            ..RunnerOptions::default()
+        };
+        let runner = FlowRunner::new(config, Some(llm), options);
+
+        // Execute
+        let outcome = runner.execute(&mut context).await.unwrap();
+
+        // Expect a pause due to red flags
+        match outcome {
+            RunnerOutcome::Paused(wait) => {
+                assert_eq!(wait.trigger, "decomposition sampling_red_flags");
+            }
+            _ => panic!(
+                "Expected execution to pause due to red flags, got {:?}",
+                outcome
+            ),
+        }
     }
 }

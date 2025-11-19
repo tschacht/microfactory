@@ -13,6 +13,11 @@ domains:
         prompt_template: "templates/code_solve_step.hbs"
         model: "gpt-4o-mini"
         samples: 10
+        red_flaggers:
+          - type: "length"
+            max_tokens: 2048
+          - type: "syntax"
+            language: "rust"
       solution_discriminator:
         prompt_template: "templates/code_solution_vote.hbs"
         model: "gpt-4o-mini"

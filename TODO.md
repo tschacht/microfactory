@@ -17,7 +17,7 @@ Each task should include:
 ## Pending Tasks
 
 ### TASK-001: Per-Agent Red-Flagger Configuration
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Priority**: High
 - **Context**: Currently, `red_flaggers` are defined globally for a domain. This causes issues where "syntax" checks (meant for code generation) run against Decomposition agents (which output text plans), leading to false positives and wasted tokens.
 - **Implementation Details**:

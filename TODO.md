@@ -60,6 +60,18 @@ Each task should include:
     - Capture the output using the new default (human) mode.
     - Add the "Execution Trace" section in README.md with this authentic artifact.
 
+### TASK-012: LLM Inspection View (Layered Logs)
+- **Status**: `[ ]`
+- **Priority**: High
+- **Dependencies**: TASK-008
+- **Context**: While `TASK-008` improved general logging, the `rig-core` library "double-encodes" LLM message history (serializing JSON strings inside JSON logs). This makes debugging prompts and model responses painful. We need a specialized view to "peel the onion" and show exactly what is being sent to the model.
+- **Implementation Details**:
+    - See detailed plan in [docs/plans/TASK-012.md](docs/plans/TASK-012.md).
+    - **Summary**:
+        - Add `--inspect <MODE>` global flag (`ops`, `payloads`, `messages`).
+        - Implement `InspectionLayer` in `src/tracing_inspect.rs` to intercept and decode `rig-core` spans.
+        - Replace default stdout logging when inspection mode is active, but keep file logging intact.
+
 ### TASK-007: Parallelize Red-Flagger Evaluation
 - **Status**: `[x]`
 - **Priority**: High

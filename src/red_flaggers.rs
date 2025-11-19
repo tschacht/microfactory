@@ -152,7 +152,7 @@ impl RedFlagger for SyntaxRedFlagger {
             .context("Failed to parse code")?;
 
         if let Some(error) = find_syntax_error(&tree) {
-            Ok(Some(format!("Syntax error detected: {}", error)))
+            Ok(Some(format!("Syntax error detected: {error}")))
         } else {
             Ok(None)
         }
@@ -211,7 +211,7 @@ impl RedFlagger for LlmRedFlagger {
         // Expecting the LLM to say "yes" if it's bad, or "no" if it's good, or some structured output.
         // Let's assume the prompt asks "Is this code invalid? Answer YES or NO."
         if trimmed.starts_with("yes") {
-            Ok(Some(format!("LLM critique flagged content: {}", response)))
+            Ok(Some(format!("LLM critique flagged content: {response}")))
         } else {
             Ok(None)
         }

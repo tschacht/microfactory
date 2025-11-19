@@ -24,7 +24,8 @@ tree-sitter = "0.25.10"
 tree-sitter-python = "0.25.0"
 tree-sitter-java = "0.23.5"
 tree-sitter-rust = "0.24.0"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json", "registry"] }
+tracing-appender = "0.2"
 regex = "1.12.2"
 
 [dev-dependencies]

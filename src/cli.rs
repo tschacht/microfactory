@@ -8,6 +8,20 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(about = "MAKER-inspired workflow runner", version)]
 #[command(disable_help_subcommand = true)]
 pub struct Cli {
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "Enable verbose logging (debug level)"
+    )]
+    pub verbose: bool,
+
+    #[arg(long, global = true, help = "Emit JSON logs to stdout")]
+    pub log_json: bool,
+
+    #[arg(long, global = true, help = "Pretty-print JSON logs")]
+    pub pretty: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

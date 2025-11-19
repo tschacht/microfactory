@@ -121,8 +121,14 @@ microfactory run \
   --llm-model gpt-5.1-codex \
   --samples 8 --k 3 --adaptive-k \
   --max-concurrent-llm 4 \
-  --step-by-step
+  --step-by-step \
+  --verbose
 ```
+
+Global options available on all commands:
+- `-v, --verbose`: Enable detailed logging to stdout (includes timestamps and debug-level events from internal modules).
+- `--log-json`: Emit structured JSON logs to stdout instead of human-readable text. Ideal for ingestion by other tools or LLMs.
+- `--pretty`: When used with `--log-json`, formats the output as multi-line, indented JSON for human readability.
 
 Options include `--repo-path`, `--dry-run` (single model probe), and `--max-concurrent-llm` for rate limiting. Runs create a UUID session, enqueue decomposition work, and persist progress to `~/.microfactory/sessions.sqlite3`.
 
@@ -186,7 +192,9 @@ For each step:
 
 - **SessionStore:** Each `run`/`resume` interaction saves the serialized `Context` plus CLI metadata to SQLite. Files live under `~/.microfactory/sessions.sqlite3` by default (see `src/paths.rs`).
 - **Metrics:** `Context.metrics` stores per-step sample counts, resamples, red-flag incidents, vote margins, duration (ms), and verification flags. These metrics surface in `status --json` output via `SessionDetailExport`.
-- **Tracing:** Tasks emit `tracing` events (e.g., decomposition proposals ready, solution votes, red-flag hits). Configure `RUST_LOG=info` to view them.
+- **Tracing & Logging:** 
+  - **Stdout:** By default, prints clean, human-friendly status updates. Use `-v` to reveal timestamps and debug details, or `--log-json` (optionally with `--pretty`) for structured output.
+  - **File:** Full debug logs (JSON) are automatically persisted to `~/.microfactory/logs/session-<UUID>.log` for every run, ensuring no diagnostic data is lost even if the CLI is quiet.
 
 ## 10. Working With Human-in-Loop Pauses
 

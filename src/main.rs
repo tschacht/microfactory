@@ -26,30 +26,49 @@ use microfactory::{
     status_export::{SessionDetailExport, SessionListExport, count_completed_steps},
 };
 
+mod tracing_setup;
+
 static HOME_ENV_ONCE: OnceLock<()> = OnceLock::new();
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing for observability
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
-    match cli.command {
-        Commands::Run(args) => run_command(args).await?,
-        Commands::Status(args) => status_command(args).await?,
-        Commands::Resume(args) => resume_command(args).await?,
-        Commands::Subprocess(args) => subprocess_command(args).await?,
-        Commands::Serve(args) => serve_command(args).await?,
-        Commands::Help(args) => help_command(args).await?,
+
+    // Pre-calculate session ID for logging context
+    let log_session_id = match &cli.command {
+        Commands::Run(_) => Some(new_session_id()),
+        Commands::Resume(args) => Some(args.session_id.clone()),
+        Commands::Subprocess(_) => Some(format!("subprocess-{}", new_session_id())),
+        Commands::Status(args) => args.session_id.clone(),
+        // Help and Serve don't get session-specific log files by default
+        _ => None,
+    };
+
+    // Initialize tracing (holds file handle)
+    let _guard = tracing_setup::init(
+        cli.verbose,
+        cli.log_json,
+        cli.pretty,
+        log_session_id.as_deref(),
+    );
+
+    let result = match cli.command {
+        Commands::Run(args) => run_command(args, log_session_id.unwrap()).await,
+        Commands::Status(args) => status_command(args).await,
+        Commands::Resume(args) => resume_command(args).await,
+        Commands::Subprocess(args) => subprocess_command(args, log_session_id.unwrap()).await,
+        Commands::Serve(args) => serve_command(args).await,
+        Commands::Help(args) => help_command(args).await,
+    };
+
+    if let Err(ref e) = result {
+        tracing::error!("Command failed: {:#}", e);
     }
-    Ok(())
+
+    result
 }
 
-async fn run_command(args: RunArgs) -> Result<()> {
+async fn run_command(args: RunArgs, session_id: String) -> Result<()> {
     let config = Arc::new(load_config(&args.config)?);
     ensure_domain_exists(&config, &args.domain)?;
 
@@ -62,7 +81,7 @@ async fn run_command(args: RunArgs) -> Result<()> {
     let runner_options =
         RunnerOptions::from_cli(args.samples, args.k, args.adaptive_k, args.step_by_step);
     let mut context = Context::new(&args.prompt, &args.domain);
-    context.session_id = new_session_id();
+    context.session_id = session_id;
     context.dry_run = args.dry_run;
 
     if args.dry_run {
@@ -70,9 +89,10 @@ async fn run_command(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!(
+    tracing::info!(
         "Starting session {} (domain: {})",
-        context.session_id, context.domain
+        context.session_id,
+        context.domain
     );
 
     let metadata = SessionMetadata {
@@ -98,9 +118,12 @@ async fn run_command(args: RunArgs) -> Result<()> {
             let status = match &outcome {
                 RunnerOutcome::Completed => SessionStatus::Completed,
                 RunnerOutcome::Paused(wait) => {
-                    println!(
+                    tracing::info!(
                         "Session {} paused at step {} ({}) - {}",
-                        context.session_id, wait.step_id, wait.trigger, wait.details
+                        context.session_id,
+                        wait.step_id,
+                        wait.trigger,
+                        wait.details
                     );
                     SessionStatus::Paused
                 }
@@ -108,10 +131,10 @@ async fn run_command(args: RunArgs) -> Result<()> {
             store.save(&envelope, status)?;
             match outcome {
                 RunnerOutcome::Completed => {
-                    println!("Session {} completed successfully.", context.session_id);
+                    tracing::info!("Session {} completed successfully.", context.session_id);
                 }
                 RunnerOutcome::Paused(_) => {
-                    println!(
+                    tracing::info!(
                         "Use `microfactory resume --session-id {}` after resolving the issue.",
                         context.session_id
                     );
@@ -210,9 +233,12 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
     ensure_domain_exists(&config, &context.domain)?;
 
     if let Some(wait) = &context.wait_state {
-        println!(
+        tracing::info!(
             "Resuming session {} previously paused at step {} ({}) - {}",
-            context.session_id, wait.step_id, wait.trigger, wait.details
+            context.session_id,
+            wait.step_id,
+            wait.trigger,
+            wait.details
         );
     }
     context.clear_wait_state();
@@ -248,9 +274,12 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
             let status = match &outcome {
                 RunnerOutcome::Completed => SessionStatus::Completed,
                 RunnerOutcome::Paused(wait) => {
-                    println!(
+                    tracing::info!(
                         "Session {} paused again at step {} ({}) - {}",
-                        context.session_id, wait.step_id, wait.trigger, wait.details
+                        context.session_id,
+                        wait.step_id,
+                        wait.trigger,
+                        wait.details
                     );
                     SessionStatus::Paused
                 }
@@ -258,10 +287,10 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
             store.save(&envelope, status)?;
             match outcome {
                 RunnerOutcome::Completed => {
-                    println!("Session {} completed.", context.session_id);
+                    tracing::info!("Session {} completed.", context.session_id);
                 }
                 RunnerOutcome::Paused(_) => {
-                    println!(
+                    tracing::info!(
                         "Use `microfactory resume --session-id {}` once resolved.",
                         context.session_id
                     );
@@ -278,7 +307,7 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
     Ok(())
 }
 
-async fn subprocess_command(args: SubprocessArgs) -> Result<()> {
+async fn subprocess_command(args: SubprocessArgs, session_id: String) -> Result<()> {
     let config = Arc::new(load_config(&args.config)?);
     ensure_domain_exists(&config, &args.domain)?;
     let api_key = resolve_api_key(args.api_key.clone(), args.llm_provider)?;
@@ -290,7 +319,7 @@ async fn subprocess_command(args: SubprocessArgs) -> Result<()> {
     )?);
 
     let mut context = Context::new(&args.step, &args.domain);
-    context.session_id = format!("subprocess-{}", new_session_id());
+    context.session_id = session_id;
     if let Some(extra) = &args.context_json {
         context
             .domain_data
@@ -340,7 +369,7 @@ async fn serve_command(args: ServeArgs) -> Result<()> {
         default_limit: args.limit.max(1),
         poll_interval: Duration::from_millis(args.poll_interval_ms.max(250)),
     };
-    println!("Serving session API on http://{addr}");
+    tracing::info!("Serving session API on http://{addr}");
     server::run(addr, store, options).await
 }
 
@@ -581,6 +610,7 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
         },
     }
 }
+
 #[derive(Debug, Clone, Serialize)]
 struct HelpSection {
     topic: &'static str,
@@ -691,6 +721,7 @@ fn normalize_env_value(raw: &str) -> String {
 }
 
 async fn run_dry_run_probe(args: &RunArgs, llm: Arc<dyn LlmClient>) -> Result<()> {
+    tracing::info!("[dry-run] probing model '{}'...", args.llm_model);
     println!(
         "[dry-run] probing model '{}' with prompt...",
         args.llm_model

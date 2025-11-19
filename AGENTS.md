@@ -36,7 +36,7 @@
 ## Commit & Pull Request Guidelines
 - NEVER commit, stage changes or do any destructive operations with git (e.g. no touching the staging area, no reset index etc.). this is only manged by the human.
 - also do not ask to do any state-changing or destructive operations via git.
-- non-destructive and non-state-changing reading opertions via git are allowed.
+- non-destructive and non-state-changing reading opertions via git are allowed. e.g. git status, git log, git diff.
 - create new branches or PRs only when explicitly prompted.
 - suggest imperative, ≤72-character commit subjects ("Add adaptive k flag"), followed by focused bodies that explain intent + verification.
 - Squash fixups locally; open PRs only after `make ensure-pristine` passes and docs/config diffs are included when behavior changes.

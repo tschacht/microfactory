@@ -18,7 +18,7 @@ Each task should include:
 ## Pending Tasks
 
 ### TASK-008: Human-Friendly Logging Strategy
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Priority**: High
 - **Context**: The current CLI output is flooded with raw JSON from `rig-core`, making it hard for humans to follow the MAKER process. We need a clean default view while preserving debug data.
 - **Implementation Details**:

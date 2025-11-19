@@ -16,6 +16,15 @@ Each task should include:
 
 ## Pending Tasks
 
+### TASK-007: Parallelize Red-Flagger Evaluation
+- **Status**: `[x]`
+- **Priority**: High
+- **Context**: Currently, the `SampleCollector` iterates sequentially through LLM samples when running red-flag checks. If using `llm_critique` (which makes network calls), this adds significant latency (e.g., 5 samples * 2s = 10s delay). Parallelizing this aligns with the MAKER paper's scalability goals.
+- **Implementation Details**:
+    - Refactor `SampleCollector::collect_inner` in `src/tasks/mod.rs`.
+    - Use `tokio::task::JoinSet` (or `futures::stream`) to spawn evaluation tasks for the entire batch concurrently.
+    - Ensure metrics (red flag counts, accepted samples) are aggregated correctly after the parallel wait.
+
 ### TASK-006: Step-by-Step Execution Mode (Debugger)
 - **Status**: `[x]`
 - **Priority**: High

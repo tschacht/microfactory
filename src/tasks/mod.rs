@@ -6,6 +6,8 @@ use handlebars::Handlebars;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
+use tokio::task::JoinSet;
+
 use crate::{
     context::{
         AgentConfig, AgentKind, Context, DecompositionProposal, RedFlagIncident, StepStatus,
@@ -678,8 +680,20 @@ impl<'ctx> SampleCollector<'ctx> {
             let batch_len = batch.len();
             let before = accepted.len();
             let mut flagged_this_round = 0usize;
+
+            // Evaluate red flags in parallel
+            let mut join_set = JoinSet::new();
             for raw in batch {
-                let matches = self.pipeline.evaluate(&raw).await;
+                let pipeline = self.pipeline.clone();
+                let raw_owned = raw.clone();
+                join_set.spawn(async move {
+                    let matches = pipeline.evaluate(&raw_owned).await;
+                    (raw_owned, matches)
+                });
+            }
+
+            while let Some(result) = join_set.join_next().await {
+                let (raw, matches) = result.context("Panic in red-flag evaluation task")?;
                 if matches.is_empty() {
                     accepted.push(raw);
                 } else {
@@ -697,6 +711,7 @@ impl<'ctx> SampleCollector<'ctx> {
                     self.ctx.metrics.record_red_flags(self.step_id, incidents);
                 }
             }
+
             let accepted_delta = accepted.len() - before;
             self.ctx
                 .metrics

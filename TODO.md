@@ -69,13 +69,15 @@ Each task should include:
 - **Priority**: High
 - **Context**: The "Shakedown" revealed that `ApplyVerifyTask` uses a mock log-only applier for `patch_file`. No code is actually written to disk.
 - **Implementation Details**:
-    - Implement a real `patch_file` function (or similar) that takes the LLM's output (diff or full file) and applies it to the filesystem.
-    - Handle parsing of code blocks from the LLM response.
+    - Implement a real `patch_file` function logic.
+    - **Clarification**: This must support applying partial changes (diffs) to existing files, preserving context. It should NOT just overwrite files.
+    - **Requirement**: Define a standard diff format for the LLM (e.g., Unified Diff with `---`/`+++` headers) and use a library or the `patch` CLI to apply it.
 
-### TASK-005: Simple Overwrite File Applier
+### TASK-005: Robust Overwrite Applier (XML Support)
 - **Status**: `[x]`
 - **Priority**: Medium
-- **Context**: Simplified alternative to TASK-004. Instead of complex patching, implement a "dumb" applier that overwrites files with the full content provided by the agent. Useful for initial file creation tasks.
+- **Context**: Enhance the simple overwrite applier to support multiple files and explicit paths from the LLM solution.
 - **Implementation Details**:
-    - Add a new applier type `overwrite_file` in `config.yaml` and `runner.rs`.
-    - Logic: Extract the first code block from the solution and write it to the target path (if the step context or prompt implies a filename).
+    - Add support for parsing `<file path="...">...</file>` XML blocks in `ApplyVerifyTask`.
+    - Write full content to the specified paths.
+    - Maintain fallback heuristic for backward compatibility.

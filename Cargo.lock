@@ -1080,6 +1080,7 @@ dependencies = [
  "handlebars",
  "petgraph",
  "predicates",
+ "regex",
  "rig-core",
  "rusqlite",
  "serde",

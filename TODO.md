@@ -9,12 +9,56 @@ Each task should include:
 - **Title**: A concise summary of the task.
 - **Status**: `[ ]` (Pending), `[-]` (In Progress), `[x]` (Completed).
 - **Priority**: High, Medium, Low.
+- **Dependencies**: Optional list of blocking task IDs.
 - **Context**: Why this is needed.
 - **Implementation Details**: Specific instructions, files to touch, and expected behavior.
 
 ---
 
 ## Pending Tasks
+
+### TASK-008: Human-Friendly Logging Strategy
+- **Status**: `[ ]`
+- **Priority**: High
+- **Context**: The current CLI output is flooded with raw JSON from `rig-core`, making it hard for humans to follow the MAKER process. We need a clean default view while preserving debug data.
+- **Implementation Details**:
+    - Refactor `src/tracing_setup.rs` to support layered logging.
+    - **Default Mode**: Print clean, formatted `INFO` messages from `microfactory` crate only to stdout. Hide `rig-core` logs.
+    - **File Logging**: Always write full debug logs (including raw JSON) to `.microfactory/logs/session-<id>.log`.
+    - **JSON Output**: Add `--log-json` flag to `run` command. Support `--pretty` (default for humans) and `--compact` (for LLM/machine ingestion).
+    - **Verbose Mode**: `-v` flag enables more detailed console logs (e.g. subtask lists, red-flag details).
+
+### TASK-009: Progress UI (Spinners & Bars)
+- **Status**: `[ ]`
+- **Priority**: Medium
+- **Context**: Long-running phases (Decomposition, Solving 10 samples) look like the CLI is hanging. Visual feedback is needed.
+- **Implementation Details**:
+    - Add `indicatif` dependency.
+    - Instrument `FlowRunner` and `SampleCollector` to show spinners during LLM calls and progress bars for sample collection/voting.
+    - Ensure progress bars play nicely with the logging system (suspend bar for log lines).
+
+### TASK-010: Context-Aware Syntax Red-Flagger
+- **Status**: `[ ]`
+- **Priority**: High
+- **Context**: The `syntax` red-flagger currently fails on XML-wrapped Solver output because it treats the entire response as code. We need it to validate the *content* inside the XML blocks.
+- **Implementation Details**:
+    - Move `extract_xml_files` to a shared module (e.g., `src/utils.rs` or `src/lib.rs`).
+    - Update `SyntaxRedFlagger` in `src/red_flaggers.rs`:
+        - Add `extract_xml` (bool) configuration param.
+        - If true, parse the response into file blocks.
+        - Infer language from file extension (e.g., `.rs` -> Rust, `.py` -> Python) or fall back to the configured language.
+        - Validate each file's content separately.
+    - Update `config.yaml` to re-enable syntax checking with `extract_xml: true` for the code solver.
+
+### TASK-011: Update README with Real Trace
+- **Status**: `[ ]`
+- **Priority**: Medium
+- **Dependencies**: TASK-008, TASK-010
+- **Context**: The README currently lacks a usage example. We want a real capture that is naturally clean and informative, showcasing the new "Human-Friendly Logging".
+- **Implementation Details**:
+    - Once Logging (TASK-008) and Syntax Checks (TASK-010) are done, run the `greeter` demo again.
+    - Capture the output using the new default (human) mode.
+    - Add the "Execution Trace" section in README.md with this authentic artifact.
 
 ### TASK-007: Parallelize Red-Flagger Evaluation
 - **Status**: `[x]`

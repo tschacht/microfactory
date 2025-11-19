@@ -16,8 +16,6 @@ domains:
         red_flaggers:
           - type: "length"
             max_tokens: 2048
-          - type: "syntax"
-            language: "rust"
       solution_discriminator:
         prompt_template: "templates/code_solution_vote.hbs"
         model: "gpt-5-nano"

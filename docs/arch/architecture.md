@@ -348,19 +348,58 @@ Currently, `FlowRunner` and session management logic are tightly coupled to the 
 4. **Refactor CLI & Server:**
 
     *   Update `microfactory run` and `resume` to be thin wrappers around `SessionManager`.
-
     *   Update `POST /sessions/:id/resume` to push the session ID into the job queue instead of returning 501 or shelling out.
-
-
 
 **Current V1 Behavior (TASK-006):**
 
 The `resume` endpoint currently uses a "shell out" strategy. When `POST /sessions/:id/resume` is called, the server spawns a detached child process executing `microfactory resume --session-id <ID>`. This provides immediate functionality but lacks fine-grained control and observability compared to the planned Phase 8 in-process worker pool.
 
+### Phase 9: Advanced Dependency Graph & DAG Support
 
+**Goal:** Transition the internal workflow representation from a hierarchical tree (list of steps) to a true Directed Acyclic Graph (DAG).
 
-## Implementation Notes
+**Reasoning:**
+The current `Vec<WorkflowStep>` structure implicitly enforces a strict parent-child hierarchy. While sufficient for "divide and conquer" decomposition, it cannot express complex dependencies common in software engineering, such as:
 
+- "Run Task C only after Task A AND Task B complete."
+- "If Task A fails, run Task Recovery-A, then retry Task A."
+- Shared dependencies (e.g., "Build the project" required by multiple parallel test tasks).
+
+**Implementation Plan:**
+
+1.  **Graph Data Structure:**
+    *   Evaluate `petgraph` or a lightweight custom adjacency list to replace `Vec<WorkflowStep>`.
+    *   Update `Context` to store nodes (tasks) and edges (dependencies/relationships).
+
+2.  **Dependency-Aware Scheduler (The "GAP" Approach):**
+    *   **Algorithm:** Implement the "Execution Level" strategy (from arXiv:2510.25320).
+        - Compute levels L0 ... Lk via topological sort.
+        - Execution Loop: Identify the set of "Ready" tasks (all dependencies successfully completed). Execute them in parallel (up to concurrency limits).
+    *   **Failure Propagation:** If a node fails (and retries are exhausted), mark all transitive dependents as `Cancelled` immediately.
+
+3.  **Data Flow & Variable Substitution:**
+    *   **Mechanism:** Dependencies are not just for ordering; they are for data.
+    *   **Implementation:** When a task is scheduled, the runner must resolve placeholders in its prompt using the outputs of its dependencies.
+    *   **Syntax:** Support a `{ref_id}` syntax (e.g., `Analysis of {step_1_output}`). The `Context` must map `TaskID -> OutputString`.
+
+4.  **Agent API & Prompting Update:**
+    *   Update the `DecompositionAgent` prompt to output a strictly structured dependency list.
+    *   **Target Schema (XML-style):**
+        ```xml
+        <plan>
+          <step id="init">Initialize cargo project</step>
+          <step id="build" depends="init">Run cargo build</step>
+          <step id="test" depends="build">Run cargo test</step>
+        </plan>
+        ```
+
+5.  **Serialization Migration:**
+    *   Update `persistence.rs` (and the SQLite schema if necessary) to serialize graph relationships. A simple parent-child link is no longer sufficient; we need to store edge lists.
+
+**Impact:** This enables "build pipelines" and more complex self-healing workflows beyond simple recursion.
+
+**Implementation Notes**
 - Start prototyping with a single-task graph.
 - Test with small tasks (e.g., fix one test) before scaling.
 - Inspired by rs-graph-llm (GitHub) for orchestration.
+- **Reference:** "GAP: Graph-Based Agent Planning" (arXiv:2510.25320). The key insights to adopt are the **Execution Level scheduler** and the **explicit XML dependency parsing** to enable parallel tool use.

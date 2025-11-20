@@ -110,6 +110,13 @@ red_flaggers:
 
 ## 7. CLI Reference
 
+Every subcommand exposes two complementary help surfaces:
+
+- **Clap help (`--help` / `-h`)** – append `--help` to any command (e.g., `microfactory run --help`) to see the exact, auto-generated flag list the binary accepts. This is always the source of truth.
+- **Curated help (`microfactory help --topic …`)** – run `microfactory help --topic run` (optionally with `--format json`) for narrative context, usage snippets, and key-flag summaries tailored to each command.
+
+Use clap help when you need authoritative syntax, and the curated help when you want deeper explanations or machine-readable summaries for supervising tools.
+
 ### 7.1 `microfactory run`
 
 ```

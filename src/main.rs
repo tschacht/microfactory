@@ -478,6 +478,10 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                     description: "Defaults to ./config.yaml; point to custom configs per domain.",
                 },
                 FlagHelp {
+                    flag: "--api-key <key>",
+                    description: "Override provider API key; otherwise resolves from env/~/\\.env.",
+                },
+                FlagHelp {
                     flag: "--llm-provider <id>",
                     description: "openai | anthropic | gemini | grok; determines API key lookup.",
                 },
@@ -498,8 +502,28 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                     description: "Enable adaptive voting margins driven by live metrics.",
                 },
                 FlagHelp {
+                    flag: "--max-concurrent-llm <n>",
+                    description: "Cap simultaneous LLM calls (default 4) for rate limits.",
+                },
+                FlagHelp {
+                    flag: "--repo-path <path>",
+                    description: "Run steps relative to a specific repository or workspace.",
+                },
+                FlagHelp {
                     flag: "--dry-run",
                     description: "Skips persistence and issues a single LLM probe for validation.",
+                },
+                FlagHelp {
+                    flag: "--step-by-step",
+                    description: "Pause after decomposition and step completion for manual review.",
+                },
+                FlagHelp {
+                    flag: "-v, --verbose",
+                    description: "Global logging toggle for timestamps + debug-level stdout.",
+                },
+                FlagHelp {
+                    flag: "--log-json [--pretty|--compact]",
+                    description: "Emit structured logs instead of human text (indent vs single-line).",
                 },
             ],
             notes: vec![
@@ -527,6 +551,14 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                     flag: "--json",
                     description: "Emit structured summaries matching the HTTP API schema.",
                 },
+                FlagHelp {
+                    flag: "-v, --verbose",
+                    description: "Include timestamps/debug output in the human-readable listing.",
+                },
+                FlagHelp {
+                    flag: "--log-json [--pretty|--compact]",
+                    description: "Use JSON logging for status output (indented or single-line).",
+                },
             ],
             notes: vec![
                 "Use JSON output for LLM or dashboard ingestion without scraping stdout.",
@@ -550,12 +582,20 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                     description: "Override the saved config path if files moved.",
                 },
                 FlagHelp {
+                    flag: "--api-key <key>",
+                    description: "Swap credentials when resuming (falls back to stored/env otherwise).",
+                },
+                FlagHelp {
                     flag: "--llm-provider|--llm-model",
                     description: "Swap providers/models without editing persisted metadata.",
                 },
                 FlagHelp {
                     flag: "--samples|--k|--max-concurrent-llm",
                     description: "Tweak runtime parameters prior to resuming.",
+                },
+                FlagHelp {
+                    flag: "-v, --verbose / --log-json",
+                    description: "Global logging controls apply just like on `run`.",
                 },
             ],
             notes: vec![
@@ -571,6 +611,14 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
             ],
             key_flags: vec![
                 FlagHelp {
+                    flag: "--domain <name>",
+                    description: "Required domain key matching your config file.",
+                },
+                FlagHelp {
+                    flag: "--config <path>",
+                    description: "Config to load agent definitions from (defaults to ./config.yaml).",
+                },
+                FlagHelp {
                     flag: "--step <name>",
                     description: "Select the microtask (solver, verifier, etc.).",
                 },
@@ -581,6 +629,26 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                 FlagHelp {
                     flag: "--samples / --k",
                     description: "Sampling + vote settings for this isolated run.",
+                },
+                FlagHelp {
+                    flag: "--llm-provider / --llm-model",
+                    description: "Choose the backend + model for the subprocess call.",
+                },
+                FlagHelp {
+                    flag: "--api-key <key>",
+                    description: "Provide credentials explicitly if env resolution is insufficient.",
+                },
+                FlagHelp {
+                    flag: "--max-concurrent-llm <n>",
+                    description: "Limit simultaneous LLM calls (default 2).",
+                },
+                FlagHelp {
+                    flag: "-v, --verbose",
+                    description: "Show human-friendly logs during the subprocess run.",
+                },
+                FlagHelp {
+                    flag: "--log-json [--pretty|--compact]",
+                    description: "Emit the subprocess logs as JSON instead of text.",
                 },
             ],
             notes: vec![
@@ -608,6 +676,14 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                 FlagHelp {
                     flag: "--poll-interval-ms <n>",
                     description: "SSE polling cadence for /sessions/stream (min 250ms).",
+                },
+                FlagHelp {
+                    flag: "-v, --verbose",
+                    description: "Emit INFO/DEBUG logs for HTTP access + background tasks.",
+                },
+                FlagHelp {
+                    flag: "--log-json [--pretty|--compact]",
+                    description: "Switch server logs to structured JSON output.",
                 },
             ],
             notes: vec![

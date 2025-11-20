@@ -1,14 +1,23 @@
 #![allow(deprecated)]
 
 use assert_cmd::Command;
+use microfactory::{
+    context::Context,
+    persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
+};
 use predicates::prelude::*;
-use std::io::Write;
+use std::{io::Write, path::Path};
 
 #[test]
 fn test_default_logging_is_human_readable() {
+    let temp = tempfile::TempDir::new().unwrap();
+    seed_logging_session(temp.path());
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("microfactory"));
 
-    let assert = cmd.arg("status").assert();
+    let assert = cmd
+        .env("MICROFACTORY_HOME", temp.path())
+        .arg("status")
+        .assert();
 
     assert
         .success()
@@ -153,4 +162,26 @@ fn test_file_logging_captures_events() {
         }
     }
     assert!(found_log, "Should have found at least one session log file");
+}
+
+fn seed_logging_session(home: &Path) {
+    let data_dir = home.join(".microfactory");
+    let store = SessionStore::open(Some(data_dir)).expect("open session store for logging test");
+    let mut ctx = Context::new("Log smoke test", "code");
+    ctx.session_id = "logging-test-session".into();
+    let envelope = SessionEnvelope {
+        context: ctx,
+        metadata: SessionMetadata {
+            config_path: "config.yaml".into(),
+            llm_provider: "openai".into(),
+            llm_model: "gpt-4o".into(),
+            max_concurrent_llm: 1,
+            samples: 1,
+            k: 1,
+            adaptive_k: false,
+        },
+    };
+    store
+        .save(&envelope, SessionStatus::Running)
+        .expect("seed logging session");
 }

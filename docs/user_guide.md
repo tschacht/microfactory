@@ -127,8 +127,9 @@ microfactory run \
 
 Global options available on all commands:
 - `-v, --verbose`: Enable detailed logging to stdout (includes timestamps and debug-level events from internal modules).
-- `--log-json`: Emit structured JSON logs to stdout instead of human-readable text. Ideal for ingestion by other tools or LLMs.
-- `--pretty`: When used with `--log-json`, formats the output as multi-line, indented JSON for human readability.
+- `--log-json`: Emit structured JSON logs to stdout instead of human-readable text. Defaults to the `--pretty` format below.
+- `--pretty`: When used with `--log-json`, formats the output as multi-line, indented JSON for human readability (default).
+- `--compact`: Switch JSON logging to a single-line, machine-friendly format for tools or LLM ingestion.
 
 Options include `--repo-path`, `--dry-run` (single model probe), and `--max-concurrent-llm` for rate limiting. Runs create a UUID session, enqueue decomposition work, and persist progress to `~/.microfactory/sessions.sqlite3`.
 

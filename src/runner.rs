@@ -41,7 +41,10 @@ impl FlowRunner {
 
     /// Executes pending work items stored in the context until completion or a human-in-loop pause.
     pub async fn execute(&self, context: &mut Context) -> Result<RunnerOutcome> {
-        println!("Execute called. Queue len: {}", context.work_queue.len());
+        debug!(
+            queue_len = context.work_queue.len(),
+            "FlowRunner execute invoked"
+        );
         let llm = self
             .llm
             .clone()
@@ -66,7 +69,7 @@ impl FlowRunner {
                 .map(|s| matches!(s.status, StepStatus::Pending))
                 .unwrap_or(false)
         {
-            println!("Kickstarting decomposition for root step {}", root);
+            debug!(step_id = root, "Kickstarting decomposition for root step");
             context.enqueue_work(WorkItem::Decomposition { step_id: root });
         }
 

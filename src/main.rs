@@ -33,6 +33,14 @@ static HOME_ENV_ONCE: OnceLock<()> = OnceLock::new();
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let mut json_format = if cli.compact {
+        tracing_setup::JsonLogFormat::Compact
+    } else {
+        tracing_setup::JsonLogFormat::Pretty
+    };
+    if cli.pretty {
+        json_format = tracing_setup::JsonLogFormat::Pretty;
+    }
 
     // Pre-calculate session ID for logging context
     let log_session_id = match &cli.command {
@@ -48,7 +56,7 @@ async fn main() -> Result<()> {
     let _guard = tracing_setup::init(
         cli.verbose,
         cli.log_json,
-        cli.pretty,
+        json_format,
         log_session_id.as_deref(),
     );
 

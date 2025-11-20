@@ -19,8 +19,23 @@ pub struct Cli {
     #[arg(long, global = true, help = "Emit JSON logs to stdout")]
     pub log_json: bool,
 
-    #[arg(long, global = true, help = "Pretty-print JSON logs")]
+    #[arg(
+        long,
+        global = true,
+        help = "Pretty-print JSON logs (default for --log-json)",
+        requires = "log_json",
+        conflicts_with = "compact"
+    )]
     pub pretty: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Emit compact (single-line) JSON logs",
+        requires = "log_json",
+        conflicts_with = "pretty"
+    )]
+    pub compact: bool,
 
     #[command(subcommand)]
     pub command: Commands,

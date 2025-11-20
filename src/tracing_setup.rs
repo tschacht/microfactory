@@ -1,9 +1,15 @@
 use std::fs;
 use tracing_subscriber::{
-    Layer, Registry, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt,
+    EnvFilter, Layer, Registry, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
 use microfactory::paths;
+
+#[derive(Clone, Copy, Debug)]
+pub enum JsonLogFormat {
+    Pretty,
+    Compact,
+}
 
 /// Initializes the tracing subscriber with layered output:
 /// 1. Stdout: Formatted based on `log_json` and `verbose` flags.
@@ -13,10 +19,12 @@ use microfactory::paths;
 pub fn init(
     verbose: bool,
     log_json: bool,
-    pretty: bool,
+    json_format: JsonLogFormat,
     session_id: Option<&str>,
 ) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let registry = tracing_subscriber::registry();
+    let stdout_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| default_env_filter(verbose));
 
     // --- 1. File Layer (Always JSON, Debug, Non-blocking) ---
     let (file_layer, guard) = if let Some(id) = session_id {
@@ -45,55 +53,35 @@ pub fn init(
     // --- 2. Stdout Layer ---
     // We use Box<dyn Layer<Registry> + Send + Sync> to erase the type differences
     let stdout_layer: Box<dyn Layer<Registry> + Send + Sync> = if log_json {
-        let filter = if verbose {
-            Targets::new().with_default(tracing::Level::DEBUG)
-        } else {
-            Targets::new().with_default(tracing::Level::INFO)
-        };
-
-        if pretty {
-            Box::new(
+        match json_format {
+            JsonLogFormat::Pretty => Box::new(
                 fmt::layer()
                     .json()
                     .with_writer(|| PrettyJsonWriter::new(std::io::stdout()))
-                    .with_filter(filter),
-            )
-        } else {
-            Box::new(
+                    .with_filter(stdout_filter.clone()),
+            ),
+            JsonLogFormat::Compact => Box::new(
                 fmt::layer()
                     .json()
                     .with_writer(std::io::stdout)
-                    .with_filter(filter),
-            )
+                    .with_filter(stdout_filter.clone()),
+            ),
         }
+    } else if verbose {
+        Box::new(
+            fmt::layer()
+                .with_writer(std::io::stdout)
+                .with_filter(stdout_filter.clone()),
+        )
     } else {
-        // Human-friendly default
-        let filter = if verbose {
-            Targets::new()
-                .with_target("microfactory", tracing::Level::DEBUG)
-                .with_default(tracing::Level::INFO)
-        } else {
-            Targets::new()
-                .with_target("microfactory", tracing::Level::INFO)
-                .with_default(tracing::Level::WARN)
-        };
-
-        if verbose {
-            Box::new(
-                fmt::layer()
-                    .with_writer(std::io::stdout)
-                    .with_filter(filter),
-            )
-        } else {
-            Box::new(
-                fmt::layer()
-                    .with_writer(std::io::stdout)
-                    .without_time()
-                    .with_target(false)
-                    .with_level(true)
-                    .with_filter(filter),
-            )
-        }
+        Box::new(
+            fmt::layer()
+                .with_writer(std::io::stdout)
+                .without_time()
+                .with_target(false)
+                .with_level(true)
+                .with_filter(stdout_filter.clone()),
+        )
     };
 
     registry.with(stdout_layer).with(file_layer).init();
@@ -137,4 +125,13 @@ impl<W: std::io::Write> std::io::Write for PrettyJsonWriter<W> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
+}
+
+fn default_env_filter(verbose: bool) -> EnvFilter {
+    let spec = if verbose {
+        "microfactory=debug,rig_core=warn,info"
+    } else {
+        "microfactory=info,rig_core=warn,warn"
+    };
+    EnvFilter::new(spec)
 }

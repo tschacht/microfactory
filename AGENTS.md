@@ -26,15 +26,15 @@ Example run (assumes provider keys are already exported in your shell):
 
 ```
 microfactory run \
-  --prompt "triage flaky unit test" \
+  --prompt "Write a single-file Rust greeter that reads stdin, prints 'Hello, <name>!' (or 'friend' when blank), and include a tiny helper test." \
   --domain code \
   --config config.yaml \
   --llm-model gpt-5.1-codex-mini \
-  --samples 4 --k 2 --adaptive-k \
+  --samples 2 --k 2 \
   --step-by-step
 ```
 
-This is the canonical shakedown task we use to validate logging, step-by-step pauses, and session persistence without embedding secrets in commands.
+This is our canonical shakedown: the prompt decomposes cleanly into planning, implementing the helper/main, and describing the unit test, so it exercises logging + step-by-step checkpoints without needing repo context.
 
 ## Coding Style & Naming Conventions
 - Rust 2024 edition with the standard `cargo fmt` profile (4-space indents, trailing commas, module ordering via rustfmt).

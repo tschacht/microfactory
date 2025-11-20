@@ -20,6 +20,21 @@
 - Each subcommand exposes its own help: e.g., `microfactory run --help` covers domain selection and solver tuning, while `microfactory status --help` explains `--json`, `--limit`, and session filters.
 - Operational tools like `microfactory serve --help` and `microfactory subprocess --help` document bind addresses, polling intervals, and JSON output formats; check them before scripting against the CLI.
 - Pass `-V` to display the binary version embedded in `Cargo.toml`, useful when filing issues or comparing with deployment targets.
+- API keys should already be configured via environment variables or `~/.env` outside this workspace; avoid hardcoding them in repo files or command examples, and prefer letting the CLI auto-resolve credentials instead of passing `--api-key`.
+
+Example run (assumes provider keys are already exported in your shell):
+
+```
+microfactory run \
+  --prompt "triage flaky unit test" \
+  --domain code \
+  --config config.yaml \
+  --llm-model gpt-5.1-codex-mini \
+  --samples 4 --k 2 --adaptive-k \
+  --step-by-step
+```
+
+This is the canonical shakedown task we use to validate logging, step-by-step pauses, and session persistence without embedding secrets in commands.
 
 ## Coding Style & Naming Conventions
 - Rust 2024 edition with the standard `cargo fmt` profile (4-space indents, trailing commas, module ordering via rustfmt).

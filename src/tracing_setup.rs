@@ -30,10 +30,10 @@ pub fn init(
     let (file_layer, guard) = if let Some(id) = session_id {
         let log_dir = paths::data_dir().join("logs");
         if let Err(e) = fs::create_dir_all(&log_dir) {
-            eprintln!("Warning: Failed to create log dir {:?}: {}", log_dir, e);
+            eprintln!("Warning: Failed to create log dir {log_dir:?}: {e}");
             (None, None)
         } else {
-            let file_name = format!("session-{}.log", id);
+            let file_name = format!("session-{id}.log");
             // Use rolling::never because we want one file per session ID
             let file_appender = tracing_appender::rolling::never(&log_dir, &file_name);
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);

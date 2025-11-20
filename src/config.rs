@@ -302,8 +302,7 @@ fn resolve_prompt_template(raw: &str, base_dir: &Path) -> Result<String> {
 
     if looks_like_template_path(trimmed) {
         return Err(anyhow!(
-            "Prompt template '{}' was not found relative to {}",
-            trimmed,
+            "Prompt template '{trimmed}' was not found relative to {}",
             base_dir.display()
         ));
     }

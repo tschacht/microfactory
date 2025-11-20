@@ -136,8 +136,7 @@ fn test_file_logging_captures_events() {
     let logs_dir = temp.path().join(".microfactory").join("logs");
     assert!(
         logs_dir.exists(),
-        "Logs directory should be created at {:?}",
-        logs_dir
+        "Logs directory should be created at {logs_dir:?}"
     );
 
     let mut found_log = false;

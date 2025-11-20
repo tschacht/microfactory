@@ -109,8 +109,7 @@ impl ServeState {
 
         if !matches!(record.status, SessionStatus::Paused | SessionStatus::Failed) {
             return Err(anyhow::anyhow!(
-                "Session {} is not paused or failed (status: {:?})",
-                session_id,
+                "Session {session_id} is not paused or failed (status: {:?})",
                 record.status
             ));
         }

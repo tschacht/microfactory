@@ -630,7 +630,7 @@ fn parse_vote_response(raw: &str, max_index: usize) -> Option<usize> {
 fn enumerate_options(options: Vec<String>) -> String {
     let mut body = String::new();
     for (idx, option) in options.iter().enumerate() {
-        let _ = writeln!(&mut body, "Option {}:\n{}\n", idx + 1, option);
+        let _ = writeln!(&mut body, "Option {}:\n{option}\n", idx + 1);
     }
     body
 }
@@ -868,18 +868,18 @@ fn validate_target_path(raw: &str) -> Result<std::path::PathBuf> {
 
     // 1. Must be relative
     if path.is_absolute() {
-        return Err(anyhow!("Absolute paths are forbidden: {}", raw));
+        return Err(anyhow!("Absolute paths are forbidden: {raw}"));
     }
 
     // 2. Must not contain traversal (..)
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => {
-                return Err(anyhow!("Path traversal (..) is forbidden: {}", raw));
+                return Err(anyhow!("Path traversal (..) is forbidden: {raw}"));
             }
             std::path::Component::Normal(os_str) => {
                 if os_str == ".git" {
-                    return Err(anyhow!("Modifying .git directory is forbidden: {}", raw));
+                    return Err(anyhow!("Modifying .git directory is forbidden: {raw}"));
                 }
             }
             _ => {}
@@ -889,7 +889,7 @@ fn validate_target_path(raw: &str) -> Result<std::path::PathBuf> {
     // 3. Check for .git in path string too (to catch hidden .git inside filenames if OS allows)
     // Just standard component check above covers `.git` folder, but let's be safe.
     if raw.contains("/.git/") || raw.starts_with(".git/") || raw == ".git" {
-        return Err(anyhow!("Modifying .git directory is forbidden: {}", raw));
+        return Err(anyhow!("Modifying .git directory is forbidden: {raw}"));
     }
 
     Ok(path.to_path_buf())

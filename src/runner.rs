@@ -386,9 +386,8 @@ impl FlowRunner {
                 step_id,
                 trigger: format!("{stage}_red_flags"),
                 details: format!(
-                    "{} samples were red-flagged during {}",
-                    metrics.red_flags.len(),
-                    stage
+                    "{} samples were red-flagged during {stage}",
+                    metrics.red_flags.len()
                 ),
             });
         }
@@ -399,8 +398,8 @@ impl FlowRunner {
                 step_id,
                 trigger: format!("{stage}_resamples"),
                 details: format!(
-                    "{} resample attempts exceeded the allowed budget during {}",
-                    metrics.resamples, stage
+                    "{} resample attempts exceeded the allowed budget during {stage}",
+                    metrics.resamples
                 ),
             });
         }
@@ -552,7 +551,7 @@ mod tests {
         }
 
         async fn sample_n(&self, _: &str, n: usize, _: Option<&str>) -> Result<Vec<String>> {
-            println!("Requesting {} samples from scripted LLM", n);
+            println!("Requesting {n} samples from scripted LLM");
             let mut guard = self.batches.lock().unwrap();
             let batch = guard.pop_front().expect("no scripted responses left");
             if batch.len() == n {
@@ -770,10 +769,7 @@ mod tests {
             RunnerOutcome::Paused(wait) => {
                 assert_eq!(wait.trigger, "decomposition sampling_red_flags");
             }
-            _ => panic!(
-                "Expected execution to pause due to red flags, got {:?}",
-                outcome
-            ),
+            _ => panic!("Expected execution to pause due to red flags, got {outcome:?}"),
         }
     }
 
@@ -829,10 +825,7 @@ mod tests {
                 assert_eq!(wait.trigger, "step_by_step_checkpoint");
                 assert!(wait.details.contains("Decomposition plan ready"));
             }
-            _ => panic!(
-                "Expected first pause at decomposition checkpoint, got {:?}",
-                outcome1
-            ),
+            _ => panic!("Expected first pause at decomposition checkpoint, got {outcome1:?}"),
         }
         context.clear_wait_state();
 
@@ -843,10 +836,7 @@ mod tests {
                 assert_eq!(wait.trigger, "step_by_step_checkpoint");
                 assert!(wait.details.contains("Step finished execution"));
             }
-            _ => panic!(
-                "Expected second pause at step completion checkpoint, got {:?}",
-                outcome2
-            ),
+            _ => panic!("Expected second pause at step completion checkpoint, got {outcome2:?}"),
         }
         context.clear_wait_state();
 

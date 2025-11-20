@@ -29,8 +29,8 @@ microfactory run \
   --prompt "Write a single-file Rust greeter that reads stdin, prints 'Hello, <name>!' (or 'friend' when blank), and include a tiny helper test." \
   --domain code \
   --config config.yaml \
-  --llm-model gpt-5.1-codex-mini \
-  --samples 2 --k 2 \
+  --llm-model gpt-5-nano \
+  --samples 2 --k 1 \
   --step-by-step
 ```
 

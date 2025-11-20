@@ -28,7 +28,10 @@ pub fn env_file_candidates() -> Vec<PathBuf> {
     env_file_candidates_from(home_dir(), os_home_dir())
 }
 
-fn env_file_candidates_from(primary_home: Option<PathBuf>, fallback_home: Option<PathBuf>) -> Vec<PathBuf> {
+fn env_file_candidates_from(
+    primary_home: Option<PathBuf>,
+    fallback_home: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(mut home) = primary_home {
         home.push(".env");

@@ -315,6 +315,7 @@ mod tests {
                 samples: 2,
                 k: 2,
                 adaptive_k: false,
+                human_low_margin_threshold: 1,
             },
         };
         store.save(&envelope, status).unwrap();

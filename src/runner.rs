@@ -488,7 +488,13 @@ pub struct RunnerOptions {
 }
 
 impl RunnerOptions {
-    pub fn from_cli(samples: usize, k: usize, adaptive_k: bool, step_by_step: bool) -> Self {
+    pub fn from_cli(
+        samples: usize,
+        k: usize,
+        adaptive_k: bool,
+        step_by_step: bool,
+        human_low_margin_threshold: usize,
+    ) -> Self {
         Self {
             default_samples: samples.max(1),
             default_k: k.max(1),
@@ -497,7 +503,7 @@ impl RunnerOptions {
             min_words_for_decomposition: 8,
             human_red_flag_threshold: 4,
             human_resample_threshold: 4,
-            human_low_margin_threshold: 1,
+            human_low_margin_threshold,
             step_by_step,
         }
     }
@@ -843,5 +849,107 @@ mod tests {
         // 3. Resume: Should see no more work and complete
         let outcome3 = runner.execute(&mut context).await.unwrap();
         assert!(matches!(outcome3, RunnerOutcome::Completed));
+    }
+
+    #[test]
+    fn low_margin_threshold_zero_disables_pause() {
+        let yaml = r#"
+        domains:
+          demo:
+            agents:
+              decomposition:
+                prompt_template: "d"
+                model: "m"
+              decomposition_discriminator:
+                prompt_template: "dv"
+                model: "m"
+              solver:
+                prompt_template: "s"
+                model: "m"
+              solution_discriminator:
+                prompt_template: "sv"
+                model: "m"
+        "#;
+        let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml).unwrap());
+        let options = RunnerOptions {
+            human_low_margin_threshold: 0,
+            ..RunnerOptions::default()
+        };
+        let runner = FlowRunner::new(config, None, options);
+        let mut ctx = Context::new("demo", "demo");
+        let step_id = ctx.ensure_root();
+        ctx.metrics
+            .record_vote(step_id, AgentKind::DecompositionDiscriminator, 1, 0);
+
+        let wait = runner.check_vote_triggers(&ctx, step_id, "decomposition vote");
+        assert!(wait.is_none(), "threshold=0 should skip low-margin pauses");
+    }
+
+    #[test]
+    fn positive_threshold_pauses_when_margin_is_low() {
+        let yaml = r#"
+        domains:
+          demo:
+            agents:
+              decomposition:
+                prompt_template: "d"
+                model: "m"
+              decomposition_discriminator:
+                prompt_template: "dv"
+                model: "m"
+              solver:
+                prompt_template: "s"
+                model: "m"
+              solution_discriminator:
+                prompt_template: "sv"
+                model: "m"
+        "#;
+        let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml).unwrap());
+        let options = RunnerOptions {
+            human_low_margin_threshold: 2,
+            ..RunnerOptions::default()
+        };
+        let runner = FlowRunner::new(config, None, options);
+        let mut ctx = Context::new("demo", "demo");
+        let step_id = ctx.ensure_root();
+        ctx.metrics
+            .record_vote(step_id, AgentKind::DecompositionDiscriminator, 1, 0);
+
+        let wait = runner.check_vote_triggers(&ctx, step_id, "decomposition vote");
+        assert!(wait.is_some(), "margin 1 <= threshold 2 should pause");
+    }
+
+    #[test]
+    fn positive_threshold_allows_decisive_votes() {
+        let yaml = r#"
+        domains:
+          demo:
+            agents:
+              decomposition:
+                prompt_template: "d"
+                model: "m"
+              decomposition_discriminator:
+                prompt_template: "dv"
+                model: "m"
+              solver:
+                prompt_template: "s"
+                model: "m"
+              solution_discriminator:
+                prompt_template: "sv"
+                model: "m"
+        "#;
+        let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml).unwrap());
+        let options = RunnerOptions {
+            human_low_margin_threshold: 1,
+            ..RunnerOptions::default()
+        };
+        let runner = FlowRunner::new(config, None, options);
+        let mut ctx = Context::new("demo", "demo");
+        let step_id = ctx.ensure_root();
+        ctx.metrics
+            .record_vote(step_id, AgentKind::DecompositionDiscriminator, 3, 1);
+
+        let wait = runner.check_vote_triggers(&ctx, step_id, "decomposition vote");
+        assert!(wait.is_none(), "margin 2 > threshold 1 should continue");
     }
 }

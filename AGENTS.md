@@ -31,6 +31,7 @@ microfactory run \
   --config config.yaml \
   --llm-model gpt-5-nano \
   --samples 2 --k 1 \
+  --human-low-margin-threshold 1 \
   --step-by-step
 ```
 

@@ -20,6 +20,7 @@ fn seed_session(store: &SessionStore, session_id: &str, prompt: &str, domain: &s
             samples: 2,
             k: 2,
             adaptive_k: false,
+            human_low_margin_threshold: 1,
         },
     };
 

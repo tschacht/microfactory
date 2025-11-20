@@ -86,8 +86,13 @@ async fn run_command(args: RunArgs, session_id: String) -> Result<()> {
         args.max_concurrent_llm,
         resolve_api_key(args.api_key.clone(), args.llm_provider)?,
     )?);
-    let runner_options =
-        RunnerOptions::from_cli(args.samples, args.k, args.adaptive_k, args.step_by_step);
+    let runner_options = RunnerOptions::from_cli(
+        args.samples,
+        args.k,
+        args.adaptive_k,
+        args.step_by_step,
+        args.human_low_margin_threshold,
+    );
     let mut context = Context::new(&args.prompt, &args.domain);
     context.session_id = session_id;
     context.dry_run = args.dry_run;
@@ -111,6 +116,7 @@ async fn run_command(args: RunArgs, session_id: String) -> Result<()> {
         samples: args.samples,
         k: args.k,
         adaptive_k: args.adaptive_k,
+        human_low_margin_threshold: args.human_low_margin_threshold,
     };
     let store = SessionStore::open(None)?;
     let mut envelope = SessionEnvelope {
@@ -232,6 +238,9 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
     let samples = args.samples.unwrap_or(prev_metadata.samples);
     let k = args.k.unwrap_or(prev_metadata.k);
     let adaptive = prev_metadata.adaptive_k;
+    let human_low_margin_threshold = args
+        .human_low_margin_threshold
+        .unwrap_or(prev_metadata.human_low_margin_threshold);
 
     let config_path = args
         .config
@@ -258,7 +267,8 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
         max_concurrent,
         api_key,
     )?);
-    let runner_options = RunnerOptions::from_cli(samples, k, adaptive, false);
+    let runner_options =
+        RunnerOptions::from_cli(samples, k, adaptive, false, human_low_margin_threshold);
 
     let metadata = SessionMetadata {
         config_path: config_path.to_string_lossy().to_string(),
@@ -268,6 +278,7 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
         samples,
         k,
         adaptive_k: adaptive,
+        human_low_margin_threshold,
     };
     let mut envelope = SessionEnvelope {
         context: context.clone(),
@@ -338,7 +349,7 @@ async fn subprocess_command(args: SubprocessArgs, session_id: String) -> Result<
     context.enqueue_work(WorkItem::Solve { step_id: root_id });
     context.enqueue_work(WorkItem::SolutionVote { step_id: root_id });
 
-    let runner_options = RunnerOptions::from_cli(args.samples, args.k, false, false);
+    let runner_options = RunnerOptions::from_cli(args.samples, args.k, false, false, 1);
     let runner = FlowRunner::new(config, Some(llm_client), runner_options);
     match runner.execute(&mut context).await? {
         RunnerOutcome::Completed => {
@@ -518,6 +529,10 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                     description: "Pause after decomposition and step completion for manual review.",
                 },
                 FlagHelp {
+                    flag: "--human-low-margin-threshold <n>",
+                    description: "Human pause trigger for thin vote margins (set 0 to keep running despite ties).",
+                },
+                FlagHelp {
                     flag: "-v, --verbose",
                     description: "Global logging toggle for timestamps + debug-level stdout.",
                 },
@@ -592,6 +607,10 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                 FlagHelp {
                     flag: "--samples|--k|--max-concurrent-llm",
                     description: "Tweak runtime parameters prior to resuming.",
+                },
+                FlagHelp {
+                    flag: "--human-low-margin-threshold <n>",
+                    description: "Override the low-margin pause guard (0 disables).",
                 },
                 FlagHelp {
                     flag: "-v, --verbose / --log-json",
@@ -906,6 +925,7 @@ mod tests {
             repo_path: None,
             dry_run: true,
             step_by_step: false,
+            human_low_margin_threshold: 1,
         };
 
         let client: Arc<dyn LlmClient> = Arc::new(FailingClient);

@@ -20,12 +20,18 @@ pub struct SessionMetadata {
     pub samples: usize,
     pub k: usize,
     pub adaptive_k: bool,
+    #[serde(default = "default_low_margin_threshold")]
+    pub human_low_margin_threshold: usize,
 }
 
 impl SessionMetadata {
     pub fn describe_provider(&self) -> &str {
         &self.llm_provider
     }
+}
+
+fn default_low_margin_threshold() -> usize {
+    1
 }
 
 /// Stored payload including context plus metadata.
@@ -251,6 +257,7 @@ mod tests {
                 samples: 2,
                 k: 2,
                 adaptive_k: false,
+                human_low_margin_threshold: 1,
             },
         };
 

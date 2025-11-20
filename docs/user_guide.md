@@ -140,6 +140,9 @@ Global options available on all commands:
 
 Options include `--repo-path`, `--dry-run` (single model probe), and `--max-concurrent-llm` for rate limiting. Runs create a UUID session, enqueue decomposition work, and persist progress to `~/.microfactory/sessions.sqlite3`.
 
+**Low-Margin Guard:**
+Use `--human-low-margin-threshold <n>` to control when the runner pauses for ambiguous votes. The default (`1`) pauses whenever the winner leads by one vote or less; passing `0` disables the guard entirely so execution continues even on razor-thin margins.
+
 **Step-by-Step Mode:**
 Pass `--step-by-step` to force the runner to pause at critical checkpoints:
 1. **Post-Decomposition:** Inspect the subtasks planned by the agent before any code is written.
@@ -210,7 +213,7 @@ Triggers (configurable in `RunnerOptions`) include:
 
 - `human_red_flag_threshold` (default 4 incidents per step)
 - `human_resample_threshold` (default 4 resamples)
-- `human_low_margin_threshold` (default vote margin ≤ 1)
+- `human_low_margin_threshold` (default 1; configurable via `--human-low-margin-threshold`, set to 0 to disable)
 - `step_by_step_checkpoint` (when `--step-by-step` is active)
 
 When triggered, Microfactory:

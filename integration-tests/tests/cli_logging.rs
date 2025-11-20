@@ -178,6 +178,7 @@ fn seed_logging_session(home: &Path) {
             samples: 1,
             k: 1,
             adaptive_k: false,
+            human_low_margin_threshold: 1,
         },
     };
     store

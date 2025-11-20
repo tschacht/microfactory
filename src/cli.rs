@@ -113,6 +113,13 @@ pub struct RunArgs {
         help = "Pauses execution after decomposition and after each step completion."
     )]
     pub step_by_step: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Pause when vote margins are <= this value (set 0 to disable the guard)"
+    )]
+    pub human_low_margin_threshold: usize,
 }
 
 #[derive(Args, Debug)]
@@ -170,6 +177,12 @@ pub struct ResumeArgs {
 
     #[arg(long, help = "Override voting k")]
     pub k: Option<usize>,
+
+    #[arg(
+        long,
+        help = "Override low-margin pause threshold (0 disables); defaults to stored value"
+    )]
+    pub human_low_margin_threshold: Option<usize>,
 }
 
 #[derive(Debug, Args, Clone)]

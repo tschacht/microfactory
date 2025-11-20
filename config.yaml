@@ -32,20 +32,20 @@ domains:
     agents:
       decomposition:
         prompt_template: "templates/analysis_decompose.hbs"
-        model: "claude-3.5-haiku"
+        model: "gpt-5-nano"
         samples: 2
       decomposition_discriminator:
         prompt_template: "templates/analysis_decompose_vote.hbs"
-        model: "claude-3.5-haiku"
+        model: "gpt-5-nano"
         samples: 2
         k: 2
       solver:
         prompt_template: "templates/analysis_solve_step.hbs"
-        model: "gemini-1.5-pro"
+        model: "gpt-5-nano"
         samples: 4
       solution_discriminator:
         prompt_template: "templates/analysis_solution_vote.hbs"
-        model: "gemini-1.5-pro"
+        model: "gpt-5-nano"
         samples: 2
         k: 2
     step_granularity:

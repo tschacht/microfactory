@@ -19,7 +19,7 @@ use microfactory::{
     config::MicrofactoryConfig,
     context::{Context, StepMetrics, WorkItem},
     llm::{LlmClient, RigLlmClient},
-    paths::home_env_path,
+    paths,
     persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
     server::{self, ServeOptions},
@@ -755,12 +755,20 @@ fn normalize_key(value: Option<String>) -> Option<String> {
 
 fn ensure_home_env_loaded() {
     HOME_ENV_ONCE.get_or_init(|| {
-        if let Some(path) = home_env_path()
-            && let Ok(contents) = fs::read_to_string(&path)
-        {
+        let candidates = paths::env_file_candidates();
+        if let Some(contents) = load_env_from_candidates(&candidates) {
             apply_env_contents(&contents);
         }
     });
+}
+
+fn load_env_from_candidates(paths: &[PathBuf]) -> Option<String> {
+    for path in paths {
+        if let Ok(contents) = fs::read_to_string(path) {
+            return Some(contents);
+        }
+    }
+    None
 }
 
 fn apply_env_contents(contents: &str) {
@@ -852,7 +860,8 @@ mod tests {
     use super::*;
     use anyhow::anyhow;
     use async_trait::async_trait;
-    use std::{path::PathBuf, sync::Arc};
+    use std::{fs, path::PathBuf, sync::Arc};
+    use tempfile::tempdir;
 
     #[test]
     fn pick_api_key_prefers_cli_value() {
@@ -938,5 +947,30 @@ mod tests {
             std::env::remove_var(NEW_VAR);
             std::env::remove_var(EXISTING_VAR);
         }
+    }
+
+    #[test]
+    fn load_env_prefers_microfactory_candidate_when_present() {
+        let primary = tempdir().unwrap();
+        let fallback = tempdir().unwrap();
+        let primary_file = primary.path().join(".env");
+        let fallback_file = fallback.path().join(".env");
+        fs::write(&primary_file, "PRIMARY=1").unwrap();
+        fs::write(&fallback_file, "FALLBACK=1").unwrap();
+
+        let contents = load_env_from_candidates(&[primary_file, fallback_file]).unwrap();
+        assert_eq!(contents, "PRIMARY=1");
+    }
+
+    #[test]
+    fn load_env_falls_back_when_microfactory_env_missing() {
+        let primary = tempdir().unwrap();
+        let fallback = tempdir().unwrap();
+        let missing_primary = primary.path().join(".env");
+        let fallback_file = fallback.path().join(".env");
+        fs::write(&fallback_file, "FALLBACK=1").unwrap();
+
+        let contents = load_env_from_candidates(&[missing_primary, fallback_file.clone()]).unwrap();
+        assert_eq!(contents, "FALLBACK=1");
     }
 }

@@ -205,6 +205,15 @@ struct AgentConfig {
 - Adaptive `k`: Optionally adjust `k` based on aggregated per-step metrics (success/failure rates) when `--adaptive-k` is enabled.
 - Human-in-Loop: Stdin prompts for approval when configured triggers fire (e.g., repeated verification failures, persistent red flags, or high disagreement between agents).
 
+### Inspection Layers (Planned)
+- **Motivation:** The default logs are intentionally compact. For debugging complex MAKER runs, Microfactory will grow a layered inspection view (see `docs/plans/TASK-012.md`) so developers can peel back from coarse envelopes to raw LLM traffic.
+- **Layers:** A future global `--inspect <MODE>` flag will switch stdout into one of several logical views:
+  - `ops` – one line per LLM call (provider, model, operation, token usage, latency).
+  - `payloads` – decoded JSON request/response bodies, including message lists and tool schemas.
+  - `messages` – a human-readable transcript of user/assistant/tool messages.
+  - `files` – summaries of `<file path=\"…\">…</file>` XML blocks proposed by solver agents, grouped per step.
+- **Source of truth:** Regardless of `--inspect`, the JSON file logs under `~/.microfactory/logs` remain the canonical record; inspection layers are projections over that stream for humans and supervising tools.
+
 ## Project Structure
 ```
 microfactory/

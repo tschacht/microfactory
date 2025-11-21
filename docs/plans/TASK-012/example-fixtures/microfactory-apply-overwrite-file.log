@@ -1,0 +1,11 @@
+# Fixture: microfactory-apply-overwrite-file.log
+# Source: session-52f1d07d-5d2a-40a7-9810-e5898779f287
+# Purpose: Shows the Microfactory-side lifecycle around applying an XML-based
+# solution: a solution vote completes, an XML `<file>` block is written to
+# `src/main.rs` via the `overwrite_file` applier, `cargo check` runs as the
+# verifier, and the step is marked completed.
+{"timestamp":"2025-11-21T19:43:08.899263Z","level":"DEBUG","fields":{"message":"Solution vote completed","step_id":7,"winner_idx":2,"winner_votes":2,"runner_up_votes":0,"vote_k":3},"target":"microfactory::tasks"}
+{"timestamp":"2025-11-21T19:43:08.905100Z","level":"INFO","fields":{"message":"Overwrote file (XML block)","step_id":7,"path":"src/main.rs"},"target":"microfactory::tasks"}
+{"timestamp":"2025-11-21T19:43:08.905169Z","level":"INFO","fields":{"message":"Running verification","step_id":7,"command":"cargo check"},"target":"microfactory::tasks"}
+{"timestamp":"2025-11-21T19:43:10.239810Z","level":"INFO","fields":{"message":"Step completed","step_id":7,"step.description":"Implement the single-file program at src/main.rs with:"},"target":"microfactory::runner"}
+{"timestamp":"2025-11-21T19:43:10.240128Z","level":"DEBUG","fields":{"message":"Rendering value: Path(Relative(([Named(\"prompt\")], \"prompt\")))","log.target":"handlebars::render","log.module_path":"handlebars::render","log.file":"/Users/lumpy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/handlebars-4.5.0/src/render.rs","log.line":811},"target":"handlebars::render"}

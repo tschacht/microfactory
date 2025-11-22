@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
-handlebars = "4.5"
+handlebars = "6.3"
 petgraph = "0.6"
 rig = { version = "0.24.0", package = "rig-core" }
 rusqlite = { version = "0.31", features = ["bundled"] }

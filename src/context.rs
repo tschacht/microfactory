@@ -19,6 +19,8 @@ pub struct Context {
     pub pending_solutions: HashMap<usize, Vec<String>>,
     pub work_queue: VecDeque<WorkItem>,
     pub wait_state: Option<WaitState>,
+    #[serde(default)]
+    pub output_dir: Option<std::path::PathBuf>,
 }
 
 impl Context {

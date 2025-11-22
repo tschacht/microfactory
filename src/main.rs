@@ -96,6 +96,7 @@ async fn run_command(args: RunArgs, session_id: String) -> Result<()> {
     let mut context = Context::new(&args.prompt, &args.domain);
     context.session_id = session_id;
     context.dry_run = args.dry_run;
+    context.output_dir = args.output_dir.clone();
 
     if args.dry_run {
         run_dry_run_probe(&args, llm_client.clone()).await?;
@@ -533,6 +534,10 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                     description: "Human pause trigger for thin vote margins (set 0 to keep running despite ties).",
                 },
                 FlagHelp {
+                    flag: "-o, --output-dir <path>",
+                    description: "Directory for output files (default: current working directory).",
+                },
+                FlagHelp {
                     flag: "-v, --verbose",
                     description: "Global logging toggle for timestamps + debug-level stdout.",
                 },
@@ -926,6 +931,7 @@ mod tests {
             dry_run: true,
             step_by_step: false,
             human_low_margin_threshold: 1,
+            output_dir: None,
         };
 
         let client: Arc<dyn LlmClient> = Arc::new(FailingClient);

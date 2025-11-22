@@ -129,6 +129,7 @@ microfactory run \
   --samples 8 --k 3 --adaptive-k \
   --max-concurrent-llm 4 \
   --step-by-step \
+  --output-dir /tmp/mf-result \
   --verbose
 ```
 
@@ -138,7 +139,7 @@ Global options available on all commands:
 - `--pretty`: When used with `--log-json`, formats the output as multi-line, indented JSON for human readability (default).
 - `--compact`: Switch JSON logging to a single-line, machine-friendly format for tools or LLM ingestion.
 
-Options include `--repo-path`, `--dry-run` (single model probe), and `--max-concurrent-llm` for rate limiting. Runs create a UUID session, enqueue decomposition work, and persist progress to `~/.microfactory/sessions.sqlite3`.
+Options include `--repo-path`, `--dry-run` (single model probe), `--max-concurrent-llm` for rate limiting, and `--output-dir` (or `-o`) to specify where generated files should be written (defaults to current directory). Runs create a UUID session, enqueue decomposition work, and persist progress to `~/.microfactory/sessions.sqlite3`.
 
 **Low-Margin Guard:**
 Use `--human-low-margin-threshold <n>` to control when the runner pauses for ambiguous votes. The default (`1`) pauses whenever the winner leads by one vote or less; passing `0` disables the guard entirely so execution continues even on razor-thin margins.

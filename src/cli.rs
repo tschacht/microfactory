@@ -120,6 +120,13 @@ pub struct RunArgs {
         help = "Pause when vote margins are <= this value (set 0 to disable the guard)"
     )]
     pub human_low_margin_threshold: usize,
+
+    #[arg(
+        short = 'o',
+        long,
+        help = "Directory for output files (default: current working directory)"
+    )]
+    pub output_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]

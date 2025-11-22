@@ -435,21 +435,29 @@ impl MicroTask for ApplyVerifyTask {
                     for (path_str, content) in files {
                         match validate_target_path(&path_str) {
                             Ok(safe_path) => {
-                                if let Some(parent) = safe_path.parent() {
+                                let real_path = if let Some(root) = &ctx.output_dir {
+                                    // Ensure output directory exists
+                                    std::fs::create_dir_all(root).ok();
+                                    root.join(&safe_path)
+                                } else {
+                                    safe_path.clone()
+                                };
+
+                                if let Some(parent) = real_path.parent() {
                                     std::fs::create_dir_all(parent).ok();
                                 }
-                                match std::fs::write(&safe_path, content) {
+                                match std::fs::write(&real_path, content) {
                                     Ok(_) => {
                                         info!(
                                             step_id = self.step_id,
-                                            path = %safe_path.display(),
+                                            path = %real_path.display(),
                                             "Overwrote file (XML block)"
                                         );
                                     }
                                     Err(e) => {
                                         warn!(
                                             step_id = self.step_id,
-                                            path = %safe_path.display(),
+                                            path = %real_path.display(),
                                             error = ?e,
                                             "Failed to overwrite file"
                                         );
@@ -480,15 +488,24 @@ impl MicroTask for ApplyVerifyTask {
                             Ok(safe_path) => {
                                 let content =
                                     extract_code_content(step.winning_solution.as_ref().unwrap());
-                                if let Some(parent) = safe_path.parent() {
+
+                                let real_path = if let Some(root) = &ctx.output_dir {
+                                    // Ensure output directory exists
+                                    std::fs::create_dir_all(root).ok();
+                                    root.join(&safe_path)
+                                } else {
+                                    safe_path.clone()
+                                };
+
+                                if let Some(parent) = real_path.parent() {
                                     std::fs::create_dir_all(parent).ok();
                                 }
-                                match std::fs::write(&safe_path, content) {
+                                match std::fs::write(&real_path, content) {
                                     Ok(_) => {
-                                        info!(step_id = self.step_id, path = %safe_path.display(), "Overwrote file (legacy heuristic)");
+                                        info!(step_id = self.step_id, path = %real_path.display(), "Overwrote file (legacy heuristic)");
                                     }
                                     Err(e) => {
-                                        warn!(step_id = self.step_id, path = %safe_path.display(), error = ?e, "Failed to overwrite file");
+                                        warn!(step_id = self.step_id, path = %real_path.display(), error = ?e, "Failed to overwrite file");
                                         ctx.mark_step_status(self.step_id, StepStatus::Failed);
                                         return Ok(TaskResult::continue_with(TaskEffect::None));
                                     }
@@ -1081,5 +1098,27 @@ And the lib:
         assert_eq!(responses.len(), 1);
         assert_eq!(ctx.metrics.red_flag_hits, 1);
         assert!(ctx.metrics.resample_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn apply_verify_writes_to_output_dir() {
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let output_dir = tmp.path().join("subdir");
+        let mut ctx = Context::new("Write file.txt", "code");
+        ctx.output_dir = Some(output_dir.clone());
+
+        let root = ctx.ensure_root();
+        ctx.mark_step_solution(root, "content".to_string());
+
+        let task = ApplyVerifyTask::new(root, Some("overwrite_file".into()), None);
+
+        // The description "Write file.txt" should trigger heuristic extraction of "file.txt"
+        task.run(&mut ctx).await.unwrap();
+
+        let expected_path = output_dir.join("file.txt");
+        assert!(expected_path.exists());
+        assert_eq!(std::fs::read_to_string(expected_path).unwrap(), "content");
     }
 }

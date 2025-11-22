@@ -32,7 +32,8 @@ microfactory run \
   --llm-model gpt-5-nano \
   --samples 2 --k 1 \
   --human-low-margin-threshold 1 \
-  --step-by-step
+  --step-by-step \
+  --output-dir /tmp/mf-result
 ```
 
 This is our canonical shakedown: the prompt decomposes cleanly into planning, implementing the helper/main, and describing the unit test, so it exercises logging + step-by-step checkpoints without needing repo context.

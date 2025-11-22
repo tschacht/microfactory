@@ -101,6 +101,7 @@ red_flaggers:
     max_tokens: 2048
   - type: "syntax"
     language: "python"
+    extract_xml: true  # Validate only code inside <file> blocks
   - type: "llm_critique"
     model: "gpt-4o"
     prompt_template: "Critique this code: {{candidate}}"

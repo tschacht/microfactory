@@ -8,6 +8,7 @@ use tree_sitter::{Parser, Tree};
 
 use crate::config::RedFlaggerConfig;
 use crate::llm::LlmClient;
+use crate::utils::extract_xml_files;
 
 /// Describes a single red-flag incident that caused a sample to be rejected.
 #[derive(Debug, Clone)]
@@ -41,7 +42,11 @@ impl RedFlagPipeline {
                 }
                 "syntax" => {
                     let language = extract_string(&cfg.params, "language")?;
-                    Box::new(SyntaxRedFlagger { language })
+                    let extract_xml = extract_bool(&cfg.params, "extract_xml")?.unwrap_or(false);
+                    Box::new(SyntaxRedFlagger {
+                        language,
+                        extract_xml,
+                    })
                 }
                 "llm_critique" => {
                     let client = llm
@@ -117,6 +122,7 @@ impl RedFlagger for LengthRedFlagger {
 
 struct SyntaxRedFlagger {
     language: String,
+    extract_xml: bool,
 }
 
 #[async_trait]
@@ -126,36 +132,71 @@ impl RedFlagger for SyntaxRedFlagger {
     }
 
     async fn flag(&self, candidate: &str) -> Result<Option<String>> {
-        let language = match self.language.as_str() {
-            "python" => tree_sitter_python::LANGUAGE.into(),
-            "java" => tree_sitter_java::LANGUAGE.into(),
-            "rust" => tree_sitter_rust::LANGUAGE.into(),
-            _ => {
-                // Fallback to simple check for non-supported languages
-                if is_unbalanced(candidate) {
-                    return Ok(Some(format!(
-                        "{} delimiters appear unbalanced (simple check)",
-                        self.language
-                    )));
+        if self.extract_xml {
+            let files = extract_xml_files(candidate);
+            if !files.is_empty() {
+                for (path, content) in files {
+                    let lang = infer_language(&path).unwrap_or(&self.language);
+                    if let Some(error) = check_syntax(&content, lang)? {
+                        return Ok(Some(format!("Syntax error in {path}: {error}")));
+                    }
                 }
                 return Ok(None);
             }
-        };
+        }
 
-        let mut parser = Parser::new();
-        parser
-            .set_language(&language)
-            .context("Error loading grammar")?;
-
-        let tree = parser
-            .parse(candidate, None)
-            .context("Failed to parse code")?;
-
-        if let Some(error) = find_syntax_error(&tree) {
-            Ok(Some(format!("Syntax error detected: {error}")))
+        // Fallback: check the entire candidate as the configured language
+        if let Some(error) = check_syntax(candidate, &self.language)? {
+            Ok(Some(error))
         } else {
             Ok(None)
         }
+    }
+}
+
+fn infer_language(path: &str) -> Option<&str> {
+    if path.ends_with(".rs") {
+        Some("rust")
+    } else if path.ends_with(".py") {
+        Some("python")
+    } else if path.ends_with(".java") {
+        Some("java")
+    } else if path.ends_with(".js") || path.ends_with(".ts") {
+        Some("javascript") // Note: we might need to add JS support if we want it, but for now it falls back or fails if not in check_syntax
+    } else {
+        None
+    }
+}
+
+fn check_syntax(content: &str, language_name: &str) -> Result<Option<String>> {
+    let language = match language_name {
+        "python" => tree_sitter_python::LANGUAGE.into(),
+        "java" => tree_sitter_java::LANGUAGE.into(),
+        "rust" => tree_sitter_rust::LANGUAGE.into(),
+        _ => {
+            // Fallback to simple check for non-supported languages
+            if is_unbalanced(content) {
+                return Ok(Some(format!(
+                    "{language_name} delimiters appear unbalanced (simple check)"
+                )));
+            }
+            return Ok(None);
+        }
+    };
+
+    let mut parser = Parser::new();
+    parser
+        .set_language(&language)
+        .context("Error loading grammar")?;
+
+    let tree = parser
+        .parse(content, None)
+        .context("Failed to parse code")?;
+
+    if let Some(error) = find_syntax_error(&tree) {
+        Ok(Some(format!("Syntax error detected: {error}")))
+    } else {
+        Ok(None)
     }
 }
 
@@ -260,6 +301,16 @@ fn extract_string(map: &BTreeMap<String, Value>, key: &str) -> Result<String> {
         .context(format!("Parameter '{key}' must be a string"))
 }
 
+fn extract_bool(map: &BTreeMap<String, Value>, key: &str) -> Result<Option<bool>> {
+    match map.get(key) {
+        Some(val) => val
+            .as_bool()
+            .map(Some)
+            .context(format!("Parameter '{key}' must be a boolean")),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +326,7 @@ mod tests {
     async fn syntax_flagger_detects_errors() {
         let flagger = SyntaxRedFlagger {
             language: "python".into(),
+            extract_xml: false,
         };
         // Invalid Python: missing colon
         assert!(flagger.flag("def foo() pass").await.unwrap().is_some());
@@ -283,6 +335,7 @@ mod tests {
 
         let rust_flagger = SyntaxRedFlagger {
             language: "rust".into(),
+            extract_xml: false,
         };
         // Invalid Rust: missing semicolon
         assert!(
@@ -303,6 +356,7 @@ mod tests {
 
         let java_flagger = SyntaxRedFlagger {
             language: "java".into(),
+            extract_xml: false,
         };
         // Invalid Java: missing semicolon
         assert!(
@@ -320,6 +374,54 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn syntax_flagger_extracts_xml() {
+        let flagger = SyntaxRedFlagger {
+            language: "python".into(),
+            extract_xml: true,
+        };
+
+        let valid_xml = r#"
+            <file path="script.py">
+            def foo():
+                pass
+            </file>
+        "#;
+        assert!(flagger.flag(valid_xml).await.unwrap().is_none());
+
+        let invalid_xml = r#"
+            <file path="script.py">
+            def foo() pass
+            </file>
+        "#;
+        let err = flagger.flag(invalid_xml).await.unwrap();
+        assert!(err.is_some());
+        assert!(err.unwrap().contains("Syntax error in script.py"));
+
+        // Mixed languages
+        let mixed_xml = r#"
+            <file path="script.py">
+            def foo(): pass
+            </file>
+            <file path="main.rs">
+            fn main() { let x = 1; }
+            </file>
+        "#;
+        assert!(flagger.flag(mixed_xml).await.unwrap().is_none());
+
+        let mixed_invalid_xml = r#"
+            <file path="script.py">
+            def foo(): pass
+            </file>
+            <file path="main.rs">
+            fn main() { let x = 1 }
+            </file>
+        "#;
+        let err = flagger.flag(mixed_invalid_xml).await.unwrap();
+        assert!(err.is_some());
+        assert!(err.unwrap().contains("Syntax error in main.rs"));
     }
 
     #[tokio::test]

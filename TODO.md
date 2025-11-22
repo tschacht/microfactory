@@ -38,7 +38,7 @@ Each task should include:
     - Ensure progress bars play nicely with the logging system (suspend bar for log lines).
 
 ### TASK-010: Context-Aware Syntax Red-Flagger
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Priority**: High
 - **Context**: The `syntax` red-flagger currently fails on XML-wrapped Solver output because it treats the entire response as code. We need it to validate the *content* inside the XML blocks.
 - **Implementation Details**:

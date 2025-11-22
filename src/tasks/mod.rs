@@ -3,7 +3,6 @@ use std::{collections::HashMap, fmt::Write as _, sync::Arc, time::Instant};
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use regex::RegexBuilder;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
@@ -15,6 +14,7 @@ use crate::{
     },
     llm::LlmClient,
     red_flaggers::{RedFlagMatch, RedFlagPipeline},
+    utils::extract_xml_files,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -925,17 +925,6 @@ fn extract_target_path(description: &str) -> Option<String> {
     None
 }
 
-fn extract_xml_files(raw: &str) -> Vec<(String, String)> {
-    let re = RegexBuilder::new(r#"<file\s+path="([^"]+)">\s*(.*?)\s*</file>"#)
-        .dot_matches_new_line(true)
-        .build()
-        .expect("valid regex");
-
-    re.captures_iter(raw)
-        .map(|cap| (cap[1].to_string(), cap[2].trim().to_string()))
-        .collect()
-}
-
 fn extract_code_content(raw: &str) -> String {
     if let Some(start) = raw.find("```") {
         let rest = &raw[start + 3..];
@@ -1012,29 +1001,6 @@ mod tests {
 
         let raw_plain = "Just text";
         assert_eq!(extract_code_content(raw_plain), "Just text");
-    }
-
-    #[test]
-    fn extracts_multiple_xml_files() {
-        let raw = r#"
-Here is the plan:
-
-<file path="src/main.rs">
-fn main() {
-    println!("Hello");
-}
-</file>
-
-And the lib:
-<file path="src/lib.rs">pub fn add(a: i32, b: i32) -> i32 { a + b }</file>
-        "#;
-
-        let files = extract_xml_files(raw);
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].0, "src/main.rs");
-        assert!(files[0].1.contains("println!"));
-        assert_eq!(files[1].0, "src/lib.rs");
-        assert_eq!(files[1].1, "pub fn add(a: i32, b: i32) -> i32 { a + b }");
     }
 
     #[test]

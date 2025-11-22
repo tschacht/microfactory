@@ -11,6 +11,8 @@ pub mod runner;
 pub mod server;
 pub mod status_export;
 pub mod tasks;
+pub mod tracing_inspect;
+pub mod tracing_setup;
 pub mod utils;
 
 pub use cli::{Cli, Commands};

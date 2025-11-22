@@ -24,15 +24,25 @@ use microfactory::{
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
     server::{self, ServeOptions},
     status_export::{SessionDetailExport, SessionListExport, count_completed_steps},
+    tracing_setup,
 };
-
-mod tracing_setup;
 
 static HOME_ENV_ONCE: OnceLock<()> = OnceLock::new();
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.inspect.is_some() && (cli.log_json || cli.pretty || cli.compact) {
+        use clap::CommandFactory;
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--inspect cannot be used with --log-json, --pretty, or --compact",
+            )
+            .exit();
+    }
+
     let mut json_format = if cli.compact {
         tracing_setup::JsonLogFormat::Compact
     } else {
@@ -57,6 +67,7 @@ async fn main() -> Result<()> {
         cli.verbose,
         cli.log_json,
         json_format,
+        cli.inspect,
         log_session_id.as_deref(),
     );
 
@@ -462,6 +473,10 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                     flag: "serve",
                     description: "Expose sessions over HTTP (REST + SSE) for higher-level tooling.",
                 },
+                FlagHelp {
+                    flag: "--inspect <mode>",
+                    description: "Stream detailed LLM ops/messages (ops, payloads, messages, files) to stdout.",
+                },
             ],
             notes: vec![
                 "Use `microfactory help --topic <command>` for focused instructions or `--format json` for machine parsing.",
@@ -475,6 +490,7 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
             usage_examples: vec![
                 r#"microfactory run --prompt "stabilize auth" --domain code --config config.yaml"#,
                 r#"microfactory run --prompt "audit notebooks" --domain analysis --dry-run --samples 6 --k 4"#,
+                r#"microfactory run --prompt "fix bug" --inspect messages"#,
             ],
             key_flags: vec![
                 FlagHelp {
@@ -544,6 +560,10 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                 FlagHelp {
                     flag: "--log-json [--pretty|--compact]",
                     description: "Emit structured logs instead of human text (indent vs single-line).",
+                },
+                FlagHelp {
+                    flag: "--inspect <mode>",
+                    description: "Bypass default logs to show internal LLM events (ops, payloads, messages, files).",
                 },
             ],
             notes: vec![
@@ -621,6 +641,10 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                     flag: "-v, --verbose / --log-json",
                     description: "Global logging controls apply just like on `run`.",
                 },
+                FlagHelp {
+                    flag: "--inspect <mode>",
+                    description: "Stream decoded LLM interactions during the resumed session.",
+                },
             ],
             notes: vec![
                 "Wait-state triggers are cleared automatically so execution can continue.",
@@ -674,6 +698,10 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                     flag: "--log-json [--pretty|--compact]",
                     description: "Emit the subprocess logs as JSON instead of text.",
                 },
+                FlagHelp {
+                    flag: "--inspect <mode>",
+                    description: "See the exact prompt/response for this isolated step.",
+                },
             ],
             notes: vec![
                 "Outputs SubprocessOutput JSON: session, step, candidates, winner, metrics.",
@@ -708,6 +736,10 @@ fn build_help_section(topic: HelpTopic) -> HelpSection {
                 FlagHelp {
                     flag: "--log-json [--pretty|--compact]",
                     description: "Switch server logs to structured JSON output.",
+                },
+                FlagHelp {
+                    flag: "--inspect <mode>",
+                    description: "Trace background LLM calls if the server performs any (rare).",
                 },
             ],
             notes: vec![

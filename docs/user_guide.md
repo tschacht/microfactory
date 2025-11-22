@@ -207,6 +207,7 @@ For each step:
 - **Metrics:** `Context.metrics` stores per-step sample counts, resamples, red-flag incidents, vote margins, duration (ms), and verification flags. These metrics surface in `status --json` output via `SessionDetailExport`.
 - **Tracing & Logging:** 
   - **Stdout:** By default, prints clean, human-friendly status updates. Use `-v` to reveal timestamps and debug details, or `--log-json` (optionally with `--pretty`) for structured output.
+  - **Inspection View:** Use `--inspect <mode>` (`ops`, `payloads`, `messages`, `files`) to bypass the default logger and stream detailed LLM protocol data to stdout (e.g., token usage, decoded prompts, proposed code files).
   - **File:** Full debug logs (JSON) are automatically persisted to `~/.microfactory/logs/session-<UUID>.log` for every run, ensuring no diagnostic data is lost even if the CLI is quiet.
 
 ## 10. Working With Human-in-Loop Pauses

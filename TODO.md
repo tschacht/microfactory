@@ -61,7 +61,7 @@ Each task should include:
     - Add the "Execution Trace" section in README.md with this authentic artifact.
 
 ### TASK-012: LLM Inspection View (Layered Logs)
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Priority**: High
 - **Dependencies**: TASK-008
 - **Context**: While `TASK-008` improved general logging, the `rig-core` library "double-encodes" LLM message history (serializing JSON strings inside JSON logs). This makes debugging prompts and model responses painful. We need a specialized view to "peel the onion" and show exactly what is being sent to the model.

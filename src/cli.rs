@@ -37,8 +37,24 @@ pub struct Cli {
     )]
     pub compact: bool,
 
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        help = "Inspect internal LLM events (ops, payloads, messages)"
+    )]
+    pub inspect: Option<InspectMode>,
+
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum InspectMode {
+    Ops,
+    Payloads,
+    Messages,
+    Files,
 }
 
 #[derive(Debug, Subcommand)]

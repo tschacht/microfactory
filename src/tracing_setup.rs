@@ -3,7 +3,10 @@ use tracing_subscriber::{
     EnvFilter, Layer, Registry, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
-use microfactory::paths;
+use crate::paths;
+
+use crate::cli::InspectMode;
+use crate::tracing_inspect::InspectionLayer;
 
 #[derive(Clone, Copy, Debug)]
 pub enum JsonLogFormat {
@@ -20,6 +23,7 @@ pub fn init(
     verbose: bool,
     log_json: bool,
     json_format: JsonLogFormat,
+    inspect: Option<InspectMode>,
     session_id: Option<&str>,
 ) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let registry = tracing_subscriber::registry();
@@ -52,7 +56,13 @@ pub fn init(
 
     // --- 2. Stdout Layer ---
     // We use Box<dyn Layer<Registry> + Send + Sync> to erase the type differences
-    let stdout_layer: Box<dyn Layer<Registry> + Send + Sync> = if log_json {
+    let stdout_layer: Box<dyn Layer<Registry> + Send + Sync> = if let Some(mode) = inspect {
+        // When inspecting, we use our custom layer and filter for relevant spans
+        Box::new(
+            InspectionLayer::new(mode, std::io::stdout())
+                .with_filter(Targets::new().with_default(tracing::Level::TRACE)),
+        )
+    } else if log_json {
         match json_format {
             JsonLogFormat::Pretty => Box::new(
                 fmt::layer()

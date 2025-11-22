@@ -131,8 +131,8 @@ impl ServeState {
 fn build_router(state: Arc<ServeState>) -> Router {
     Router::new()
         .route("/sessions", get(list_sessions_handler))
-        .route("/sessions/:id", get(session_detail_handler))
-        .route("/sessions/:id/resume", post(resume_session_handler))
+        .route("/sessions/{id}", get(session_detail_handler))
+        .route("/sessions/{id}/resume", post(resume_session_handler))
         .route("/sessions/stream", get(stream_sessions_handler))
         .with_state(state)
 }

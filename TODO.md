@@ -72,6 +72,15 @@ Each task should include:
         - Implement `InspectionLayer` in `src/tracing_inspect.rs` to intercept and decode `rig-core` spans.
         - Replace default stdout logging when inspection mode is active, but keep file logging intact.
 
+### TASK-013: Inspection View Streaming Support
+- **Status**: `[ ]`
+- **Priority**: Low
+- **Dependencies**: TASK-012
+- **Context**: The `ops` inspection layer (TASK-012) currently assumes request/response cycles. If/when we move to streaming LLM responses, we need to update the inspection logic to handle chunked spans correctly.
+- **Implementation Details**:
+    - Update `InspectionLayer` to aggregate streaming chunks or display incremental progress.
+    - Ensure token usage metrics are captured correctly for streams.
+
 ### TASK-007: Parallelize Red-Flagger Evaluation
 - **Status**: `[x]`
 - **Priority**: High

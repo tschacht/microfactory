@@ -152,3 +152,9 @@ We define four primary layers of data visible in the logs, plus a fifth, file-ce
 3. Record a sample session transcript demonstrating each inspect mode.
 4. Verify `microfactory run --inspect ops` still writes the full JSON log under `~/.microfactory/logs`.
 5. Ship behind the `--inspect` flag (no behavior change unless the user opts in).
+
+## Observations & Minor Adjustments
+1. **HTML Unescaping:** Must occur *after* JSON string decoding but *before* parsing inner XML/files.
+2. **File Extraction:** Use `src/utils.rs:extract_xml_files` (refactored in TASK-010) instead of `src/tasks/mod.rs`.
+3. **Streaming:** The `ops` layer assumes request/response spans. Future support for streaming spans will be tracked separately.
+4. **CLI Conflicts:** Use `clap`'s `conflicts_with` to enforce mutual exclusivity between `--inspect` and `--log-json`.

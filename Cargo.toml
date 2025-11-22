@@ -18,7 +18,7 @@ tokio = { version = "1.48", features = ["full"] }
 tracing = "0.1"
 async-trait = "0.1"
 uuid = { version = "1.18", features = ["v4"] }
-axum = { version = "0.7", features = ["json", "macros", "tokio"] }
+axum = { version = "0.8", features = ["json", "macros", "tokio"] }
 tokio-stream = "0.1"
 tree-sitter = "0.25.10"
 tree-sitter-python = "0.25.0"

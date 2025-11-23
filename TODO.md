@@ -81,6 +81,17 @@ Each task should include:
     - Update `InspectionLayer` to aggregate streaming chunks or display incremental progress.
     - Ensure token usage metrics are captured correctly for streams.
 
+### TASK-014: Layered Ring/Clean Architecture
+- **Status**: `[ ]`
+- **Priority**: Medium
+- **Dependencies**: _None_
+- **Context**: Flow orchestration, domain state, and adapters are currently interleaved, which makes it harder to test in isolation or swap implementations (LLM provider, persistence, templating). Adopting a hexagonal/ring structure will clarify responsibilities and let inner logic evolve independently.
+- **Implementation Details**:
+    - See detailed plan in [docs/plans/TASK-014-clean-architecture.md](docs/plans/TASK-014-clean-architecture.md).
+    - Introduce explicit ports for persistence, templating, telemetry, and red-flagging so `FlowRunner`/tasks depend solely on abstractions.
+    - Restructure modules (or crates) into `core`, `application`, and `adapters`, ensuring the core layer owns workflow state (`Context`, steps) and task coordination logic while adapters host CLI, persistence, LLM, and templating code.
+    - Add lightweight contract tests/fakes for the new ports to keep future refactors safe.
+
 ### TASK-007: Parallelize Red-Flagger Evaluation
 - **Status**: `[x]`
 - **Priority**: High

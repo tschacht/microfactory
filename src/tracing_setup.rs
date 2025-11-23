@@ -1,4 +1,8 @@
-use std::fs;
+use std::{
+    fs::{self, OpenOptions},
+    path::Path,
+};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
     EnvFilter, Layer, Registry, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt,
 };
@@ -38,17 +42,46 @@ pub fn init(
             (None, None)
         } else {
             let file_name = format!("session-{id}.log");
-            // Use rolling::never because we want one file per session ID
-            let file_appender = tracing_appender::rolling::never(&log_dir, &file_name);
-            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+            let file_path = log_dir.join(&file_name);
+            if let Err(e) = ensure_log_file(&file_path) {
+                eprintln!(
+                    "Warning: Failed to initialize log file {}: {e}",
+                    file_path.display()
+                );
+                (None, None)
+            } else {
+                let (prefix, suffix) = file_name
+                    .rsplit_once('.')
+                    .map(|(p, s)| (p.to_string(), Some(s.to_string())))
+                    .unwrap_or((file_name.clone(), None));
 
-            let layer = fmt::layer()
-                .json()
-                .with_writer(non_blocking)
-                // Capture everything (DEBUG) in the file
-                .with_filter(Targets::new().with_default(tracing::Level::DEBUG));
+                let mut builder = RollingFileAppender::builder().rotation(Rotation::NEVER);
+                builder = builder.filename_prefix(prefix);
+                if let Some(suffix) = suffix {
+                    builder = builder.filename_suffix(suffix);
+                }
 
-            (Some(layer), Some(guard))
+                match builder.build(&log_dir) {
+                    Ok(file_appender) => {
+                        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+                        let layer = fmt::layer()
+                            .json()
+                            .with_writer(non_blocking)
+                            // Capture everything (DEBUG) in the file
+                            .with_filter(Targets::new().with_default(tracing::Level::DEBUG));
+
+                        (Some(layer), Some(guard))
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "Warning: Failed to initialize rolling log file {}: {err}",
+                            file_path.display()
+                        );
+                        (None, None)
+                    }
+                }
+            }
         }
     } else {
         (None, None)
@@ -144,4 +177,15 @@ fn default_env_filter(verbose: bool) -> EnvFilter {
         "microfactory=info,rig_core=warn,warn"
     };
     EnvFilter::new(spec)
+}
+
+fn ensure_log_file(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map(|_| ())
 }

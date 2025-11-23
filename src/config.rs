@@ -9,6 +9,9 @@ use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
+use crate::core::config::{AgentSettings, DomainRuntimeConfig};
+use crate::core::domain::{AgentKind, RedFlaggerDescriptor};
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct MicrofactoryConfig {
     pub domains: HashMap<String, DomainConfig>,
@@ -37,6 +40,13 @@ impl MicrofactoryConfig {
 
     pub fn domain(&self, name: &str) -> Option<&DomainConfig> {
         self.domains.get(name)
+    }
+
+    pub fn runtime_domain(&self, name: &str) -> Result<DomainRuntimeConfig> {
+        let domain = self
+            .domain(name)
+            .ok_or_else(|| anyhow!("Unknown domain: {name}"))?;
+        domain.to_runtime(name)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -94,6 +104,40 @@ impl DomainConfig {
             validate_red_flagger(name, idx, flagger)?;
         }
         Ok(())
+    }
+
+    pub fn to_runtime(&self, name: &str) -> Result<DomainRuntimeConfig> {
+        let mut agents = HashMap::new();
+        agents.insert(
+            AgentKind::Decomposition,
+            agent_settings(AgentKind::Decomposition, &self.agents.decomposition)?,
+        );
+        agents.insert(
+            AgentKind::DecompositionDiscriminator,
+            agent_settings(
+                AgentKind::DecompositionDiscriminator,
+                &self.agents.decomposition_discriminator,
+            )?,
+        );
+        agents.insert(
+            AgentKind::Solver,
+            agent_settings(AgentKind::Solver, &self.agents.solver)?,
+        );
+        agents.insert(
+            AgentKind::SolutionDiscriminator,
+            agent_settings(
+                AgentKind::SolutionDiscriminator,
+                &self.agents.solution_discriminator,
+            )?,
+        );
+
+        Ok(DomainRuntimeConfig {
+            name: name.to_string(),
+            agents,
+            applier: self.applier.clone(),
+            verifier: self.verifier.clone(),
+            red_flaggers: convert_red_flaggers(&self.red_flaggers)?,
+        })
     }
 }
 
@@ -276,6 +320,44 @@ fn validate_red_flagger(domain: &str, idx: usize, cfg: &RedFlaggerConfig) -> Res
         }
     }
     Ok(())
+}
+
+fn agent_settings(kind: AgentKind, definition: &AgentDefinition) -> Result<AgentSettings> {
+    Ok(AgentSettings {
+        prompt_template: definition.prompt_template.clone(),
+        model: definition.model.clone(),
+        samples: definition.samples,
+        k: definition.k,
+        red_flaggers: definition
+            .red_flaggers
+            .as_deref()
+            .map(convert_red_flaggers)
+            .transpose()
+            .with_context(|| format!("Failed to convert red flaggers for {kind:?}"))?,
+    })
+}
+
+fn convert_red_flaggers(configs: &[RedFlaggerConfig]) -> Result<Vec<RedFlaggerDescriptor>> {
+    configs
+        .iter()
+        .enumerate()
+        .map(|(idx, cfg)| {
+            let mut params = HashMap::new();
+            for (key, value) in &cfg.params {
+                let json_value = serde_json::to_value(value).with_context(|| {
+                    format!(
+                        "Failed to convert parameter '{key}' for red flagger {} at index {idx}",
+                        cfg.kind
+                    )
+                })?;
+                params.insert(key.clone(), json_value);
+            }
+            Ok(RedFlaggerDescriptor {
+                kind: cfg.kind.clone(),
+                params,
+            })
+        })
+        .collect()
 }
 
 fn resolve_prompt_template(raw: &str, base_dir: &Path) -> Result<String> {

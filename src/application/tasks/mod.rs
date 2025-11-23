@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Write as _, sync::Arc, time::Instant};
+use std::{collections::HashMap, fmt::Write as _, sync::Arc};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use crate::{
     context::{
         AgentConfig, AgentKind, Context, DecompositionProposal, RedFlagIncident, StepStatus,
     },
-    core::ports::{LlmClient, LlmOptions, PromptRenderer},
+    core::ports::{Clock, FileSystem, LlmClient, LlmOptions, PromptRenderer},
     red_flaggers::{RedFlagMatch, RedFlagPipeline},
     utils::extract_xml_files,
 };
@@ -67,6 +67,7 @@ pub struct DecompositionTask {
     llm: Arc<dyn LlmClient>,
     red_flags: Arc<RedFlagPipeline>,
     renderer: Arc<dyn PromptRenderer>,
+    clock: Arc<dyn Clock>,
 }
 
 impl DecompositionTask {
@@ -77,6 +78,7 @@ impl DecompositionTask {
         llm: Arc<dyn LlmClient>,
         red_flags: Arc<RedFlagPipeline>,
         renderer: Arc<dyn PromptRenderer>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             step_id,
@@ -85,6 +87,7 @@ impl DecompositionTask {
             llm,
             red_flags,
             renderer,
+            clock,
         }
     }
 }
@@ -92,7 +95,7 @@ impl DecompositionTask {
 #[async_trait]
 impl MicroTask for DecompositionTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
-        let start = Instant::now();
+        let start_ms = self.clock.now_ms();
         let samples = self.agent.samples.max(1);
         let rendered_prompt = render_prompt(
             &self.renderer,
@@ -127,8 +130,8 @@ impl MicroTask for DecompositionTask {
             return Err(anyhow!("LLM returned no decomposition proposals"));
         }
 
-        ctx.metrics
-            .record_duration_ms(self.step_id, start.elapsed().as_millis());
+        let duration = self.clock.now_ms().saturating_sub(start_ms);
+        ctx.metrics.record_duration_ms(self.step_id, duration);
         ctx.register_decomposition(self.step_id, proposals);
         if let Some(step) = ctx.step(self.step_id) {
             debug!(
@@ -147,6 +150,7 @@ pub struct DecompositionVoteTask {
     llm: Arc<dyn LlmClient>,
     vote_k: usize,
     renderer: Arc<dyn PromptRenderer>,
+    clock: Arc<dyn Clock>,
 }
 
 impl DecompositionVoteTask {
@@ -156,6 +160,7 @@ impl DecompositionVoteTask {
         llm: Arc<dyn LlmClient>,
         vote_k: usize,
         renderer: Arc<dyn PromptRenderer>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             step_id,
@@ -163,6 +168,7 @@ impl DecompositionVoteTask {
             llm,
             vote_k,
             renderer,
+            clock,
         }
     }
 }
@@ -170,7 +176,7 @@ impl DecompositionVoteTask {
 #[async_trait]
 impl MicroTask for DecompositionVoteTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
-        let start = Instant::now();
+        let start_ms = self.clock.now_ms();
         let proposals = ctx
             .take_decomposition(self.step_id)
             .with_context(|| format!("No proposals available for step {}", self.step_id))?;
@@ -214,8 +220,8 @@ impl MicroTask for DecompositionVoteTask {
             winner_votes,
             runner_up_votes,
         );
-        ctx.metrics
-            .record_duration_ms(self.step_id, start.elapsed().as_millis());
+        let duration = self.clock.now_ms().saturating_sub(start_ms);
+        ctx.metrics.record_duration_ms(self.step_id, duration);
         let winner = proposals[winner_idx].clone();
         let mut new_steps = Vec::new();
         for subtask in winner.subtasks.iter() {
@@ -244,6 +250,7 @@ pub struct SolveTask {
     llm: Arc<dyn LlmClient>,
     red_flags: Arc<RedFlagPipeline>,
     renderer: Arc<dyn PromptRenderer>,
+    clock: Arc<dyn Clock>,
 }
 
 impl SolveTask {
@@ -253,6 +260,7 @@ impl SolveTask {
         llm: Arc<dyn LlmClient>,
         red_flags: Arc<RedFlagPipeline>,
         renderer: Arc<dyn PromptRenderer>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             step_id,
@@ -260,6 +268,7 @@ impl SolveTask {
             llm,
             red_flags,
             renderer,
+            clock,
         }
     }
 }
@@ -267,7 +276,7 @@ impl SolveTask {
 #[async_trait]
 impl MicroTask for SolveTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
-        let start = Instant::now();
+        let start_ms = self.clock.now_ms();
         let step = ctx
             .step(self.step_id)
             .with_context(|| format!("Unknown step {}", self.step_id))?;
@@ -290,8 +299,8 @@ impl MicroTask for SolveTask {
         if responses.is_empty() {
             return Err(anyhow!("Solver agent produced no candidates"));
         }
-        ctx.metrics
-            .record_duration_ms(self.step_id, start.elapsed().as_millis());
+        let duration = self.clock.now_ms().saturating_sub(start_ms);
+        ctx.metrics.record_duration_ms(self.step_id, duration);
         ctx.register_solutions(self.step_id, responses);
         debug!(
             step_id = self.step_id,
@@ -309,6 +318,7 @@ pub struct SolutionVoteTask {
     llm: Arc<dyn LlmClient>,
     vote_k: usize,
     renderer: Arc<dyn PromptRenderer>,
+    clock: Arc<dyn Clock>,
 }
 
 impl SolutionVoteTask {
@@ -318,6 +328,7 @@ impl SolutionVoteTask {
         llm: Arc<dyn LlmClient>,
         vote_k: usize,
         renderer: Arc<dyn PromptRenderer>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             step_id,
@@ -325,6 +336,7 @@ impl SolutionVoteTask {
             llm,
             vote_k,
             renderer,
+            clock,
         }
     }
 }
@@ -332,7 +344,7 @@ impl SolutionVoteTask {
 #[async_trait]
 impl MicroTask for SolutionVoteTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
-        let start = Instant::now();
+        let start_ms = self.clock.now_ms();
         let solutions = ctx
             .take_solutions(self.step_id)
             .with_context(|| format!("No solutions queued for step {}", self.step_id))?;
@@ -364,8 +376,8 @@ impl MicroTask for SolutionVoteTask {
             winner_votes,
             runner_up_votes,
         );
-        ctx.metrics
-            .record_duration_ms(self.step_id, start.elapsed().as_millis());
+        let duration = self.clock.now_ms().saturating_sub(start_ms);
+        ctx.metrics.record_duration_ms(self.step_id, duration);
         let winner = solutions[winner_idx].clone();
         ctx.mark_step_solution(self.step_id, winner);
         debug!(
@@ -386,14 +398,40 @@ pub struct ApplyVerifyTask {
     step_id: usize,
     applier: Option<String>,
     verifier: Option<String>,
+    file_system: Arc<dyn FileSystem>,
+    clock: Arc<dyn Clock>,
 }
 
 impl ApplyVerifyTask {
-    pub fn new(step_id: usize, applier: Option<String>, verifier: Option<String>) -> Self {
+    pub fn new(
+        step_id: usize,
+        applier: Option<String>,
+        verifier: Option<String>,
+        file_system: Arc<dyn FileSystem>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             step_id,
             applier,
             verifier,
+            file_system,
+            clock,
+        }
+    }
+
+    fn resolve_real_path(&self, ctx: &Context, safe_path: &std::path::Path) -> std::path::PathBuf {
+        if let Some(root) = &ctx.output_dir {
+            if let Err(err) = self.file_system.create_dir_all(root) {
+                warn!(
+                    step_id = self.step_id,
+                    path = %root.display(),
+                    error = ?err,
+                    "Failed to ensure output directory exists"
+                );
+            }
+            root.join(safe_path)
+        } else {
+            safe_path.to_path_buf()
         }
     }
 }
@@ -401,7 +439,7 @@ impl ApplyVerifyTask {
 #[async_trait]
 impl MicroTask for ApplyVerifyTask {
     async fn run(&self, ctx: &mut Context) -> Result<TaskResult> {
-        let start = Instant::now();
+        let start_ms = self.clock.now_ms();
         let step = ctx
             .step(self.step_id)
             .with_context(|| format!("Unknown step {}", self.step_id))?;
@@ -435,17 +473,20 @@ impl MicroTask for ApplyVerifyTask {
                     for (path_str, content) in files {
                         match validate_target_path(&path_str) {
                             Ok(safe_path) => {
-                                let real_path = if let Some(root) = &ctx.output_dir {
-                                    std::fs::create_dir_all(root).ok();
-                                    root.join(&safe_path)
-                                } else {
-                                    safe_path.clone()
-                                };
-
-                                if let Some(parent) = real_path.parent() {
-                                    std::fs::create_dir_all(parent).ok();
+                                let real_path = self.resolve_real_path(ctx, &safe_path);
+                                if let Some(parent) = real_path.parent()
+                                    && let Err(err) = self.file_system.create_dir_all(parent)
+                                {
+                                    warn!(
+                                        step_id = self.step_id,
+                                        path = %real_path.display(),
+                                        error = ?err,
+                                        "Failed to create parent directory"
+                                    );
+                                    success = false;
+                                    continue;
                                 }
-                                match std::fs::write(&real_path, content) {
+                                match self.file_system.write(&real_path, &content) {
                                     Ok(_) => {
                                         info!(
                                             step_id = self.step_id,
@@ -453,11 +494,11 @@ impl MicroTask for ApplyVerifyTask {
                                             "Overwrote file (XML block)"
                                         );
                                     }
-                                    Err(e) => {
+                                    Err(err) => {
                                         warn!(
                                             step_id = self.step_id,
                                             path = %real_path.display(),
-                                            error = ?e,
+                                            error = ?err,
                                             "Failed to overwrite file"
                                         );
                                         success = false;
@@ -488,22 +529,25 @@ impl MicroTask for ApplyVerifyTask {
                                 let content =
                                     extract_code_content(step.winning_solution.as_ref().unwrap());
 
-                                let real_path = if let Some(root) = &ctx.output_dir {
-                                    std::fs::create_dir_all(root).ok();
-                                    root.join(&safe_path)
-                                } else {
-                                    safe_path.clone()
-                                };
-
-                                if let Some(parent) = real_path.parent() {
-                                    std::fs::create_dir_all(parent).ok();
+                                let real_path = self.resolve_real_path(ctx, &safe_path);
+                                if let Some(parent) = real_path.parent()
+                                    && let Err(err) = self.file_system.create_dir_all(parent)
+                                {
+                                    warn!(
+                                        step_id = self.step_id,
+                                        path = %real_path.display(),
+                                        error = ?err,
+                                        "Failed to create parent directory"
+                                    );
+                                    ctx.mark_step_status(self.step_id, StepStatus::Failed);
+                                    return Ok(TaskResult::continue_with(TaskEffect::None));
                                 }
-                                match std::fs::write(&real_path, content) {
+                                match self.file_system.write(&real_path, &content) {
                                     Ok(_) => {
                                         info!(step_id = self.step_id, path = %real_path.display(), "Overwrote file (legacy heuristic)");
                                     }
-                                    Err(e) => {
-                                        warn!(step_id = self.step_id, path = %real_path.display(), error = ?e, "Failed to overwrite file");
+                                    Err(err) => {
+                                        warn!(step_id = self.step_id, path = %real_path.display(), error = ?err, "Failed to overwrite file");
                                         ctx.mark_step_status(self.step_id, StepStatus::Failed);
                                         return Ok(TaskResult::continue_with(TaskEffect::None));
                                     }
@@ -568,8 +612,8 @@ impl MicroTask for ApplyVerifyTask {
             }
         }
 
-        ctx.metrics
-            .record_duration_ms(self.step_id, start.elapsed().as_millis());
+        let duration = self.clock.now_ms().saturating_sub(start_ms);
+        ctx.metrics.record_duration_ms(self.step_id, duration);
         ctx.step_metrics_mut(self.step_id).verification_passed = Some(verified);
 
         if verified {
@@ -952,11 +996,16 @@ fn extract_code_content(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::RedFlaggerConfig, context::Context, red_flaggers::RedFlagPipeline};
+    use crate::{
+        adapters::outbound::{clock::SystemClock, filesystem::StdFileSystem},
+        context::{Context, RedFlaggerDescriptor},
+        core::ports::{Clock, FileSystem},
+        red_flaggers::RedFlagPipeline,
+    };
     use async_trait::async_trait;
-    use serde_yaml::Value;
+    use serde_json::json;
     use std::{
-        collections::{BTreeMap, VecDeque},
+        collections::{HashMap, VecDeque},
         sync::Mutex,
     };
 
@@ -1070,9 +1119,9 @@ mod tests {
             }
         }
 
-        let configs = vec![RedFlaggerConfig {
+        let configs = vec![RedFlaggerDescriptor {
             kind: "length".into(),
-            params: BTreeMap::from([(String::from("max_tokens"), Value::from(2))]),
+            params: HashMap::from([(String::from("max_tokens"), json!(2))]),
         }];
         let pipeline = Arc::new(RedFlagPipeline::from_configs(&configs, None).unwrap());
         let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
@@ -1103,7 +1152,15 @@ mod tests {
         let root = ctx.ensure_root();
         ctx.mark_step_solution(root, "content".to_string());
 
-        let task = ApplyVerifyTask::new(root, Some("overwrite_file".into()), None);
+        let file_system: Arc<dyn FileSystem> = Arc::new(StdFileSystem::new());
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+        let task = ApplyVerifyTask::new(
+            root,
+            Some("overwrite_file".into()),
+            None,
+            file_system,
+            clock,
+        );
 
         // The description "Write file.txt" should trigger heuristic extraction of "file.txt"
         task.run(&mut ctx).await.unwrap();

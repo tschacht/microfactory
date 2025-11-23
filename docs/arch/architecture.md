@@ -20,6 +20,14 @@ This document outlines the architecture, components, and implementation details.
 - **Safety**: Human-in-loop options, retries, and dry-run mode.
 - **Rust Advantages**: Type safety, concurrency (Tokio), error handling (anyhow).
 
+## Layered Architecture
+
+- **Core (`src/core`)** encapsulates domain models (`core::domain`), runtime config structs (`core::config`), shared errors, and directional ports under `core::ports::{inbound,outbound}`.
+- **Application (`src/application`)** hosts the orchestrator (`FlowRunner`) plus microtasks that operate purely on core abstractions.
+- **Adapters (`src/adapters`)** are split into `outbound` (LLM, persistence, templating, filesystem, clock, telemetry) and `inbound` (currently re-exporting the CLI/server until their logic is relocated).
+- **Composition root (`src/main.rs`)** wires the adapters together, instantiating `StdFileSystem`, `SystemClock`, `TracingTelemetrySink`, and the concrete LLM/persistence clients before handing everything to `FlowRunner`.
+- **Guardrails**: `cargo xtask check-architecture` (invoked automatically by `scripts/run_all_tests.sh`) runs `cargo deny --workspace` plus a static scan that ensures `src/core` never references adapter modules.
+
 ## MAKER Alignment and Extensions
 
 Microfactory aims to follow the MAKER massively decomposed agentic process (MDAP) framework while remaining generic:
@@ -56,6 +64,8 @@ microfactory run --prompt "fix tests in the repo" --api-key $OPENAI_API_KEY --ll
 Subcommands:
 - `microfactory status`: Check session progress.
 - `microfactory resume --session-id <UUID>`: Resume interrupted sessions.
+
+During development run `cargo xtask check-architecture` (or the umbrella `scripts/run_all_tests.sh`) before pushing so the layering/denial guardrails stay enforced.
 
 ## Core Components
 

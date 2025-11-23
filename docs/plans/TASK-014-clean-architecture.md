@@ -15,8 +15,8 @@ Adopt a layered ring/clean architecture so Microfactory's core workflow logic (c
 The system will be composed of three distinct concentric layers. Dependencies point **inwards**.
 
 1.  **Core (The Center)**
-    *   **Responsibility:** Pure domain logic, state (`Context`), and abstractions (`Ports`).
-    *   **Dependencies:** None (Standard Library only).
+    *   **Responsibility:** Pure domain logic, runtime state (`Context`), config views, and abstractions (`Ports`).
+    *   **Dependencies:** Standard Library + foundational crates needed for serialization/async (`serde`, `async-trait`).
     *   **Contents:**
         *   `Domain Models`: `Context`, `WorkItem`, `Step`.
         *   `Ports (Traits)`: `SessionRepository`, `LlmClient`, `PromptRenderer`, `RedFlagger`, `Clock`, `FileSystem`, `TelemetrySink`.
@@ -36,9 +36,9 @@ The system will be composed of three distinct concentric layers. Dependencies po
 
 ### 1. Directional Ports in the Type System
 Explicit namespaces encode direction:
-- **Inbound** (things that push data *into* the core, e.g., CLI/server handlers) live under `core::ports::inbound` and `adapters::inbound`.
-- **Outbound** (services the core *calls out* to, e.g., persistence, LLM, filesystem) live under `core::ports::outbound` and `adapters::outbound`.
-Every trait the core/application depends on sits in `core::ports::outbound`, and adapters implement them in `adapters::outbound::<capability>`. Conversely, input adapters expose structs under `adapters::inbound` that translate external stimuli into core commands/events.
+- **Inbound** (things that push data *into* the core, e.g., CLI/server handlers) live under `core::ports::inbound` and `adapters::inbound` (currently re-exporting the legacy CLI/server modules until they migrate fully).
+- **Outbound** (services the core *calls out* to, e.g., persistence, LLM, filesystem) live under `core::ports::outbound` and `adapters::outbound::<capability>`.
+Every trait the core/application depends on sits in `core::ports::outbound`, and adapters implement them in `adapters::outbound::<capability>`. Input adapters expose structs under `adapters::inbound` that translate external stimuli into core commands/events.
 
 ### 2. Error Boundaries
 The Core must not know about `rusqlite::Error` or `reqwest::Error`.
@@ -52,7 +52,7 @@ The Core must not know about `rusqlite::Error` or `reqwest::Error`.
     *   **Adapter:** Loads the YAML/JSON, handles `serde` parsing, and *converts* it into the Core structs.
 
 ### 4. Dependency Guardrails
-Use `cargo deny` (with the `bans` and `sources` checks) plus lint-time checks to ensure `core` never depends on adapter crates and `application` never imports concrete adapter types. Add a doc test or CI script that fails if forbidden modules are referenced.
+Use `cargo deny` (with the `bans` and `sources` checks) plus lint-time checks to ensure `core` never depends on adapter crates and `application` never imports concrete adapter types. Add a doc test or CI script (implemented as `cargo xtask check-architecture`) that fails if forbidden modules are referenced.
 
 ### 5. Testing & Coverage Discipline
 Identify critical scenarios (happy-path decomposition/solve flow, low-margin pause, adapter failures, file-write success/failure) and cover them with in-memory port implementations. Maintain current integration-test coverage by running the existing suites unchanged.
@@ -83,7 +83,7 @@ Identify critical scenarios (happy-path decomposition/solve flow, low-margin pau
 2.  Instantiate all outbound adapters (`adapters::outbound::persistence::SqliteSessionStore`, `adapters::outbound::llm::RigLlmClient`, `adapters::outbound::templating::HandlebarsRenderer`, filesystem/time/telemetry wrappers) and wire inbound adapters (`adapters::inbound::cli`, `adapters::inbound::server`).
 3.  Inject them into the `FlowRunner` via a builder or constructor.
 4.  Ensure `src/cli.rs` and `src/server.rs` only interact with the `Application` layer (Runner) or `Core` types.
-5.  Add a `cargo xtask check-architecture` (or similar) script that shells out to `cargo deny --workspace` with a curated config to enforce dependency direction.
+5.  Add a `cargo xtask check-architecture` command that shells out to `cargo deny --workspace` with a curated config to enforce dependency direction and scans `src/core` for forbidden adapter imports.
 
 ### Phase 5: Tests & Documentation
 1.  Cover the critical scenarios with in-memory adapters:
@@ -91,13 +91,13 @@ Identify critical scenarios (happy-path decomposition/solve flow, low-margin pau
     - Low-margin vote pause path.
     - Adapter failure propagation (persistence error, LLM exhaustion).
     - File-write success/failure paths for Apply/Verify.
-2.  Keep existing integration suites intact (`make test`, `scripts/run_all_tests.sh`) to prove no regression in coverage.
+2.  Keep existing integration suites intact (`make test`, `scripts/run_all_tests.sh`, `cargo xtask check-architecture`) to prove no regression in coverage.
 3.  Update `docs/architecture.md` (and README summary) with the new layer diagram and port table.
 
 ## Acceptance Criteria
 - `core` module has **zero** dependencies on `rusqlite`, `rig-core`, `handlebars`, or other adapter crates (enforced by `cargo deny`).
 - `FlowRunner` and tasks consume only trait objects (`dyn SessionRepository`, `dyn LlmClient`, etc.).
 - Unit tests cover the listed critical scenarios using in-memory adapters, and overall test coverage does not regress (existing suites remain green).
-- `cargo check`, `cargo test`, and the new architecture guard (`cargo xtask check-architecture` → `cargo deny --workspace`) all pass.
+- `cargo check`, `cargo test`, and the architecture guard (`cargo xtask check-architecture`) all pass.
 - Existing integration tests pass without modification (proving behavior is preserved).
 - Documentation describes the layer boundaries, available ports, and how to add new adapters.

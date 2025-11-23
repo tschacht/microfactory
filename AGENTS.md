@@ -1,6 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
+- This repo follows the layered ring/clean architecture described in `docs/plans/TASK-014-clean-architecture.md`—keep `core`, `application`, and `adapters::{inbound,outbound}` dependencies pointing inward.
 - `src/` holds the CLI, runner, persistence, and domain logic; start with `src/cli.rs` for clap wiring and `src/runner.rs` for execution flow.
 - `templates/` contains Handlebars prompts referenced by `config.yaml`; keep template/model names aligned with their domain blocks.
 - `docs/` hosts architecture notes, the user guide, and research context; sync this folder when behavior changes.

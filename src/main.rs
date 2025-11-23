@@ -12,16 +12,21 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use microfactory::{
-    adapters::llm::RigLlmClient,
-    adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
-    adapters::templating::HandlebarsRenderer,
+    adapters::{
+        llm::RigLlmClient,
+        outbound::{
+            clock::SystemClock, filesystem::StdFileSystem, telemetry::TracingTelemetrySink,
+        },
+        persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
+        templating::HandlebarsRenderer,
+    },
     cli::{
         Cli, Commands, HelpArgs, HelpFormat, HelpTopic, LlmProvider, ResumeArgs, RunArgs,
         ServeArgs, StatusArgs, SubprocessArgs,
     },
     config::MicrofactoryConfig,
     context::{Context, StepMetrics, WorkItem},
-    core::ports::LlmClient,
+    core::ports::{Clock, FileSystem, LlmClient, TelemetrySink},
     paths,
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
     server::{self, ServeOptions},
@@ -140,7 +145,16 @@ async fn run_command(args: RunArgs, session_id: String) -> Result<()> {
     store.save(&envelope, SessionStatus::Running)?;
 
     let renderer = Arc::new(HandlebarsRenderer::new());
-    let runner = FlowRunner::new(config, Some(llm_client), renderer, runner_options);
+    let (file_system, clock, telemetry) = default_runner_deps();
+    let runner = FlowRunner::new(
+        config,
+        Some(llm_client),
+        renderer,
+        runner_options,
+        file_system,
+        clock,
+        telemetry,
+    );
     match runner.execute(&mut context).await {
         Ok(outcome) => {
             envelope.context = context.clone();
@@ -302,7 +316,16 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
     store.save(&envelope, SessionStatus::Running)?;
 
     let renderer = Arc::new(HandlebarsRenderer::new());
-    let runner = FlowRunner::new(config, Some(llm_client), renderer, runner_options);
+    let (file_system, clock, telemetry) = default_runner_deps();
+    let runner = FlowRunner::new(
+        config,
+        Some(llm_client),
+        renderer,
+        runner_options,
+        file_system,
+        clock,
+        telemetry,
+    );
     match runner.execute(&mut context).await {
         Ok(outcome) => {
             envelope.context = context.clone();
@@ -367,7 +390,16 @@ async fn subprocess_command(args: SubprocessArgs, session_id: String) -> Result<
 
     let runner_options = RunnerOptions::from_cli(args.samples, args.k, false, false, 1);
     let renderer = Arc::new(HandlebarsRenderer::new());
-    let runner = FlowRunner::new(config, Some(llm_client), renderer, runner_options);
+    let (file_system, clock, telemetry) = default_runner_deps();
+    let runner = FlowRunner::new(
+        config,
+        Some(llm_client),
+        renderer,
+        runner_options,
+        file_system,
+        clock,
+        telemetry,
+    );
     match runner.execute(&mut context).await? {
         RunnerOutcome::Completed => {
             let step = context
@@ -417,6 +449,13 @@ async fn help_command(args: HelpArgs) -> Result<()> {
         HelpFormat::Json => println!("{}", serde_json::to_string_pretty(&section)?),
     }
     Ok(())
+}
+
+fn default_runner_deps() -> (Arc<dyn FileSystem>, Arc<dyn Clock>, Arc<dyn TelemetrySink>) {
+    let file_system: Arc<dyn FileSystem> = Arc::new(StdFileSystem::new());
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+    let telemetry: Arc<dyn TelemetrySink> = Arc::new(TracingTelemetrySink::new());
+    (file_system, clock, telemetry)
 }
 
 fn render_help_text(section: &HelpSection) {

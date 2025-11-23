@@ -6,10 +6,15 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use microfactory::{
-    adapters::templating::HandlebarsRenderer,
+    adapters::{
+        outbound::{
+            clock::SystemClock, filesystem::StdFileSystem, telemetry::TracingTelemetrySink,
+        },
+        templating::HandlebarsRenderer,
+    },
     config::MicrofactoryConfig,
     context::Context,
-    core::ports::{LlmClient, LlmOptions},
+    core::ports::{Clock, FileSystem, LlmClient, LlmOptions, TelemetrySink},
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
 };
 
@@ -102,7 +107,18 @@ domains:
     };
 
     let renderer = Arc::new(HandlebarsRenderer::new());
-    let runner = FlowRunner::new(config, Some(llm), renderer, options);
+    let file_system: Arc<dyn FileSystem> = Arc::new(StdFileSystem::new());
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+    let telemetry: Arc<dyn TelemetrySink> = Arc::new(TracingTelemetrySink::new());
+    let runner = FlowRunner::new(
+        config,
+        Some(llm),
+        renderer,
+        options,
+        file_system,
+        clock,
+        telemetry,
+    );
     let mut ctx = Context::new("Patch flaky test", "mini");
 
     let outcome = runner.execute(&mut ctx).await?;

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use anyhow::{Context as AnyhowContext, Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use tracing::{debug, info};
 
 use crate::{
@@ -8,9 +8,14 @@ use crate::{
         ApplyVerifyTask, DecompositionTask, DecompositionVoteTask, MicroTask, NextAction,
         SolutionVoteTask, SolveTask, TaskEffect,
     },
-    config::{AgentDefinition, DomainConfig, MicrofactoryConfig},
-    context::{AgentConfig, AgentKind, Context, StepStatus, WaitState, WorkItem},
-    core::ports::{LlmClient, PromptRenderer},
+    config::MicrofactoryConfig,
+    context::{
+        AgentConfig, AgentKind, Context as WorkflowContext, StepStatus, WaitState, WorkItem,
+    },
+    core::{
+        config::{AgentDefaults, AgentSettings, DomainRuntimeConfig},
+        ports::{Clock, FileSystem, LlmClient, PromptRenderer, TelemetrySink},
+    },
     red_flaggers::RedFlagPipeline,
 };
 
@@ -20,6 +25,9 @@ pub struct FlowRunner {
     llm: Option<Arc<dyn LlmClient>>,
     options: RunnerOptions,
     renderer: Arc<dyn PromptRenderer>,
+    file_system: Arc<dyn FileSystem>,
+    clock: Arc<dyn Clock>,
+    telemetry: Arc<dyn TelemetrySink>,
 }
 
 impl FlowRunner {
@@ -28,17 +36,23 @@ impl FlowRunner {
         llm: Option<Arc<dyn LlmClient>>,
         renderer: Arc<dyn PromptRenderer>,
         options: RunnerOptions,
+        file_system: Arc<dyn FileSystem>,
+        clock: Arc<dyn Clock>,
+        telemetry: Arc<dyn TelemetrySink>,
     ) -> Self {
         Self {
             config,
             llm,
             options,
             renderer,
+            file_system,
+            clock,
+            telemetry,
         }
     }
 
     /// Executes pending work items stored in the context until completion or a human-in-loop pause.
-    pub async fn execute(&self, context: &mut Context) -> Result<RunnerOutcome> {
+    pub async fn execute(&self, context: &mut WorkflowContext) -> Result<RunnerOutcome> {
         debug!(
             queue_len = context.work_queue.len(),
             "FlowRunner execute invoked"
@@ -50,9 +64,15 @@ impl FlowRunner {
 
         let domain_cfg = self
             .config
-            .domain(&context.domain)
-            .with_context(|| format!("Unknown domain: {}", context.domain))?;
-        let agent_configs = self.agent_configs(domain_cfg);
+            .runtime_domain(&context.domain)
+            .with_context(|| {
+                format!(
+                    "Failed to resolve runtime config for domain {}",
+                    context.domain
+                )
+            })?;
+        let agent_configs = self.agent_configs(&domain_cfg);
+        let domain_flaggers = &domain_cfg.red_flaggers;
         // Red flaggers are now resolved per-agent inside the loop.
 
         if context.root_step_id().is_none() {
@@ -71,6 +91,10 @@ impl FlowRunner {
             context.enqueue_work(WorkItem::Decomposition { step_id: root });
         }
 
+        let mut start_props = HashMap::new();
+        start_props.insert("pending_work".into(), context.work_queue.len().to_string());
+        self.emit_telemetry(context, "runner_execute_start", start_props);
+
         while let Some(item) = context.dequeue_work() {
             let current_item = item.clone();
             match item {
@@ -84,10 +108,7 @@ impl FlowRunner {
                         .expect("missing decomposition agent")
                         .clone();
 
-                    let rf_configs = agent
-                        .red_flaggers
-                        .as_deref()
-                        .unwrap_or(&domain_cfg.red_flaggers);
+                    let rf_configs = agent.red_flaggers.as_deref().unwrap_or(domain_flaggers);
                     let red_flag_pipeline = Arc::new(
                         RedFlagPipeline::from_configs(rf_configs, Some(llm.clone()))
                             .context("Failed to build decomposition red-flagger pipeline")?,
@@ -100,17 +121,19 @@ impl FlowRunner {
                         llm.clone(),
                         red_flag_pipeline.clone(),
                         self.renderer.clone(),
+                        self.clock.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
                         self.handle_next_action(result.action, &current_item, context)
                     {
-                        return Ok(outcome);
+                        return self.finish_with(context, outcome);
                     }
                     if let Some(wait) =
                         self.check_sampling_triggers(context, step_id, "decomposition sampling")
                     {
-                        return Ok(self.pause_with(context, wait, current_item));
+                        let pause = self.pause_with(context, wait, current_item);
+                        return self.finish_with(context, pause);
                     }
                     context.enqueue_work_front(WorkItem::DecompositionVote { step_id });
                 }
@@ -127,21 +150,20 @@ impl FlowRunner {
                         llm.clone(),
                         vote_k,
                         self.renderer.clone(),
+                        self.clock.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
                         self.handle_next_action(result.action, &current_item, context)
                     {
-                        return Ok(outcome);
+                        return self.finish_with(context, outcome);
                     }
                     if let Some(wait) =
                         self.check_vote_triggers(context, step_id, "decomposition vote")
                     {
-                        return Ok(self.pause_with(
-                            context,
-                            wait,
-                            WorkItem::Decomposition { step_id },
-                        ));
+                        let pause =
+                            self.pause_with(context, wait, WorkItem::Decomposition { step_id });
+                        return self.finish_with(context, pause);
                     }
 
                     if let TaskEffect::SpawnedSteps(children) = result.effect {
@@ -170,7 +192,7 @@ impl FlowRunner {
                             wait.trigger.clone(),
                             wait.details.clone(),
                         );
-                        return Ok(RunnerOutcome::Paused(wait));
+                        return self.finish_with(context, RunnerOutcome::Paused(wait));
                     }
                 }
                 WorkItem::Solve { step_id } => {
@@ -179,10 +201,7 @@ impl FlowRunner {
                         .expect("missing solver agent")
                         .clone();
 
-                    let rf_configs = agent
-                        .red_flaggers
-                        .as_deref()
-                        .unwrap_or(&domain_cfg.red_flaggers);
+                    let rf_configs = agent.red_flaggers.as_deref().unwrap_or(domain_flaggers);
                     let red_flag_pipeline = Arc::new(
                         RedFlagPipeline::from_configs(rf_configs, Some(llm.clone()))
                             .context("Failed to build solver red-flagger pipeline")?,
@@ -194,17 +213,19 @@ impl FlowRunner {
                         llm.clone(),
                         red_flag_pipeline.clone(),
                         self.renderer.clone(),
+                        self.clock.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
                         self.handle_next_action(result.action, &current_item, context)
                     {
-                        return Ok(outcome);
+                        return self.finish_with(context, outcome);
                     }
                     if let Some(wait) =
                         self.check_sampling_triggers(context, step_id, "solver sampling")
                     {
-                        return Ok(self.pause_with(context, wait, current_item));
+                        let pause = self.pause_with(context, wait, current_item);
+                        return self.finish_with(context, pause);
                     }
                     if matches!(result.effect, TaskEffect::SolutionsReady { .. }) {
                         context.enqueue_work_front(WorkItem::SolutionVote { step_id });
@@ -222,16 +243,18 @@ impl FlowRunner {
                         llm.clone(),
                         vote_k,
                         self.renderer.clone(),
+                        self.clock.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
                         self.handle_next_action(result.action, &current_item, context)
                     {
-                        return Ok(outcome);
+                        return self.finish_with(context, outcome);
                     }
                     if let Some(wait) = self.check_vote_triggers(context, step_id, "solution vote")
                     {
-                        return Ok(self.pause_with(context, wait, WorkItem::Solve { step_id }));
+                        let pause = self.pause_with(context, wait, WorkItem::Solve { step_id });
+                        return self.finish_with(context, pause);
                     }
                     if let TaskEffect::WinnerSelected { step_id } = result.effect {
                         context.enqueue_work_front(WorkItem::ApplyVerify { step_id });
@@ -242,12 +265,14 @@ impl FlowRunner {
                         step_id,
                         domain_cfg.applier.clone(),
                         domain_cfg.verifier.clone(),
+                        self.file_system.clone(),
+                        self.clock.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
                         self.handle_next_action(result.action, &current_item, context)
                     {
-                        return Ok(outcome);
+                        return self.finish_with(context, outcome);
                     }
                     if let TaskEffect::StepCompleted { step_id } = result.effect
                         && let Some(step) = context.step(step_id)
@@ -266,7 +291,7 @@ impl FlowRunner {
                                 wait.trigger.clone(),
                                 wait.details.clone(),
                             );
-                            return Ok(RunnerOutcome::Paused(wait));
+                            return self.finish_with(context, RunnerOutcome::Paused(wait));
                         }
                     }
                 }
@@ -283,12 +308,12 @@ impl FlowRunner {
             total = context.steps.len(),
             "FlowRunner execution complete"
         );
-        Ok(RunnerOutcome::Completed)
+        self.finish_with(context, RunnerOutcome::Completed)
     }
 
     fn pause_with(
         &self,
-        context: &mut Context,
+        context: &mut WorkflowContext,
         wait: WaitState,
         retry_item: WorkItem,
     ) -> RunnerOutcome {
@@ -306,7 +331,7 @@ impl FlowRunner {
         &self,
         action: NextAction,
         current_item: &WorkItem,
-        context: &mut Context,
+        context: &mut WorkflowContext,
     ) -> Option<RunnerOutcome> {
         match action {
             NextAction::Continue | NextAction::End => None,
@@ -327,7 +352,7 @@ impl FlowRunner {
         }
     }
 
-    fn should_recurse(&self, context: &Context, step_id: usize) -> bool {
+    fn should_recurse(&self, context: &WorkflowContext, step_id: usize) -> bool {
         if let Some(step) = context.step(step_id) {
             if step.depth >= self.options.max_decomposition_depth {
                 return false;
@@ -338,7 +363,12 @@ impl FlowRunner {
         false
     }
 
-    fn resolve_k(&self, agent_kind: AgentKind, agent: &AgentConfig, context: &Context) -> usize {
+    fn resolve_k(
+        &self,
+        agent_kind: AgentKind,
+        agent: &AgentConfig,
+        context: &WorkflowContext,
+    ) -> usize {
         let base = agent.k.unwrap_or(self.options.default_k).max(1);
         if !self.options.adaptive_k {
             return base;
@@ -372,7 +402,7 @@ impl FlowRunner {
 
     fn check_sampling_triggers(
         &self,
-        context: &Context,
+        context: &WorkflowContext,
         step_id: usize,
         stage: &str,
     ) -> Option<WaitState> {
@@ -406,7 +436,7 @@ impl FlowRunner {
 
     fn check_vote_triggers(
         &self,
-        context: &Context,
+        context: &WorkflowContext,
         step_id: usize,
         stage: &str,
     ) -> Option<WaitState> {
@@ -424,45 +454,106 @@ impl FlowRunner {
         None
     }
 
-    fn agent_configs(&self, domain: &DomainConfig) -> HashMap<AgentKind, AgentConfig> {
+    fn agent_configs(&self, domain: &DomainRuntimeConfig) -> HashMap<AgentKind, AgentConfig> {
+        let defaults = AgentDefaults {
+            samples: self.options.default_samples,
+            k: self.options.default_k,
+        };
         let mut map = HashMap::new();
         map.insert(
             AgentKind::Decomposition,
-            self.build_agent_config(AgentKind::Decomposition, &domain.agents.decomposition),
+            self.build_agent_config(
+                AgentKind::Decomposition,
+                domain
+                    .agent_settings(AgentKind::Decomposition)
+                    .expect("missing decomposition agent"),
+                defaults,
+            ),
         );
         map.insert(
             AgentKind::DecompositionDiscriminator,
             self.build_agent_config(
                 AgentKind::DecompositionDiscriminator,
-                &domain.agents.decomposition_discriminator,
+                domain
+                    .agent_settings(AgentKind::DecompositionDiscriminator)
+                    .expect("missing decomposition discriminator"),
+                defaults,
             ),
         );
         map.insert(
             AgentKind::Solver,
-            self.build_agent_config(AgentKind::Solver, &domain.agents.solver),
+            self.build_agent_config(
+                AgentKind::Solver,
+                domain
+                    .agent_settings(AgentKind::Solver)
+                    .expect("missing solver agent"),
+                defaults,
+            ),
         );
         map.insert(
             AgentKind::SolutionDiscriminator,
             self.build_agent_config(
                 AgentKind::SolutionDiscriminator,
-                &domain.agents.solution_discriminator,
+                domain
+                    .agent_settings(AgentKind::SolutionDiscriminator)
+                    .expect("missing solution discriminator"),
+                defaults,
             ),
         );
         map
     }
 
-    fn build_agent_config(&self, kind: AgentKind, definition: &AgentDefinition) -> AgentConfig {
-        AgentConfig {
-            kind,
-            prompt_template: definition.prompt_template.clone(),
-            model: definition.model.clone(),
-            samples: definition
-                .samples
-                .unwrap_or(self.options.default_samples)
-                .max(1),
-            k: definition.k.or(Some(self.options.default_k)),
-            red_flaggers: definition.red_flaggers.clone(),
+    fn build_agent_config(
+        &self,
+        kind: AgentKind,
+        settings: &AgentSettings,
+        defaults: AgentDefaults,
+    ) -> AgentConfig {
+        settings.as_agent_config(kind, &defaults)
+    }
+
+    fn finish_with(
+        &self,
+        context: &WorkflowContext,
+        outcome: RunnerOutcome,
+    ) -> Result<RunnerOutcome> {
+        self.record_outcome_event(context, &outcome);
+        Ok(outcome)
+    }
+
+    fn record_outcome_event(&self, context: &WorkflowContext, outcome: &RunnerOutcome) {
+        let mut props = HashMap::new();
+        match outcome {
+            RunnerOutcome::Completed => {
+                props.insert("state".into(), "completed".into());
+            }
+            RunnerOutcome::Paused(wait) => {
+                props.insert("state".into(), "paused".into());
+                props.insert("wait_trigger".into(), wait.trigger.clone());
+                props.insert("step_id".into(), wait.step_id.to_string());
+            }
         }
+        self.emit_telemetry(context, "runner_outcome", props);
+    }
+
+    fn emit_telemetry(
+        &self,
+        context: &WorkflowContext,
+        event_name: &str,
+        mut properties: HashMap<String, String>,
+    ) {
+        let mut base = self.base_telemetry_props(context);
+        base.extend(properties.drain());
+        self.telemetry.record_event(event_name, base);
+    }
+
+    fn base_telemetry_props(&self, context: &WorkflowContext) -> HashMap<String, String> {
+        let mut props = HashMap::new();
+        if !context.session_id.is_empty() {
+            props.insert("session_id".into(), context.session_id.clone());
+        }
+        props.insert("domain".into(), context.domain.clone());
+        props
     }
 }
 
@@ -527,10 +618,15 @@ impl Default for RunnerOptions {
 mod tests {
     use super::*;
     use crate::{
-        adapters::templating::HandlebarsRenderer,
+        adapters::{
+            outbound::{
+                clock::SystemClock, filesystem::StdFileSystem, telemetry::TracingTelemetrySink,
+            },
+            templating::HandlebarsRenderer,
+        },
         config::MicrofactoryConfig,
         context::{Context, StepStatus},
-        core::ports::{LlmClient, LlmOptions},
+        core::ports::{Clock, FileSystem, LlmClient, LlmOptions, TelemetrySink},
     };
 
     use async_trait::async_trait;
@@ -574,6 +670,13 @@ mod tests {
 
             Ok(current_batch.remove(0))
         }
+    }
+
+    fn test_deps() -> (Arc<dyn FileSystem>, Arc<dyn Clock>, Arc<dyn TelemetrySink>) {
+        let fs: Arc<dyn FileSystem> = Arc::new(StdFileSystem::new());
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
+        let telemetry: Arc<dyn TelemetrySink> = Arc::new(TracingTelemetrySink::new());
+        (fs, clock, telemetry)
     }
 
     #[tokio::test]
@@ -636,7 +739,16 @@ mod tests {
         };
 
         let renderer = Arc::new(HandlebarsRenderer::new());
-        let runner = FlowRunner::new(config, Some(llm), renderer, options);
+        let (file_system, clock, telemetry) = test_deps();
+        let runner = FlowRunner::new(
+            config,
+            Some(llm),
+            renderer,
+            options,
+            file_system,
+            clock,
+            telemetry,
+        );
         let mut context = Context::new("Fix the bug", "code");
         let outcome = runner.execute(&mut context).await.unwrap();
         assert!(matches!(outcome, RunnerOutcome::Completed));
@@ -684,7 +796,16 @@ mod tests {
             "analysis",
         );
         let renderer = Arc::new(HandlebarsRenderer::new());
-        let runner = FlowRunner::new(config, Some(llm), renderer, RunnerOptions::default());
+        let (file_system, clock, telemetry) = test_deps();
+        let runner = FlowRunner::new(
+            config,
+            Some(llm),
+            renderer,
+            RunnerOptions::default(),
+            file_system,
+            clock,
+            telemetry,
+        );
         let outcome = runner.execute(&mut context).await.unwrap();
         assert!(matches!(outcome, RunnerOutcome::Completed));
 
@@ -747,7 +868,16 @@ mod tests {
             default_samples: 1,
             ..RunnerOptions::default()
         };
-        let runner = FlowRunner::new(config, Some(llm), renderer, options);
+        let (file_system, clock, telemetry) = test_deps();
+        let runner = FlowRunner::new(
+            config,
+            Some(llm),
+            renderer,
+            options,
+            file_system,
+            clock,
+            telemetry,
+        );
         let outcome = runner.execute(&mut context).await.unwrap();
         assert!(matches!(outcome, RunnerOutcome::Completed));
 
@@ -799,7 +929,16 @@ mod tests {
             ..RunnerOptions::default()
         };
         let renderer = Arc::new(HandlebarsRenderer::new());
-        let runner = FlowRunner::new(config, Some(llm), renderer, options);
+        let (file_system, clock, telemetry) = test_deps();
+        let runner = FlowRunner::new(
+            config,
+            Some(llm),
+            renderer,
+            options,
+            file_system,
+            clock,
+            telemetry,
+        );
 
         // Execute
         let outcome = runner.execute(&mut context).await.unwrap();
@@ -857,7 +996,16 @@ mod tests {
             ..RunnerOptions::default()
         };
         let renderer = Arc::new(HandlebarsRenderer::new());
-        let runner = FlowRunner::new(config, Some(llm), renderer, options);
+        let (file_system, clock, telemetry) = test_deps();
+        let runner = FlowRunner::new(
+            config,
+            Some(llm),
+            renderer,
+            options,
+            file_system,
+            clock,
+            telemetry,
+        );
 
         // 1. First run: Should reach Decomposition Vote and then Pause
         let outcome1 = runner.execute(&mut context).await.unwrap();
@@ -911,7 +1059,16 @@ mod tests {
             ..RunnerOptions::default()
         };
         let renderer = Arc::new(HandlebarsRenderer::new());
-        let runner = FlowRunner::new(config, None, renderer, options);
+        let (file_system, clock, telemetry) = test_deps();
+        let runner = FlowRunner::new(
+            config,
+            None,
+            renderer,
+            options,
+            file_system,
+            clock,
+            telemetry,
+        );
         let mut ctx = Context::new("demo", "demo");
         let step_id = ctx.ensure_root();
         ctx.metrics
@@ -946,7 +1103,16 @@ mod tests {
             ..RunnerOptions::default()
         };
         let renderer = Arc::new(HandlebarsRenderer::new());
-        let runner = FlowRunner::new(config, None, renderer, options);
+        let (file_system, clock, telemetry) = test_deps();
+        let runner = FlowRunner::new(
+            config,
+            None,
+            renderer,
+            options,
+            file_system,
+            clock,
+            telemetry,
+        );
         let mut ctx = Context::new("demo", "demo");
         let step_id = ctx.ensure_root();
         ctx.metrics
@@ -981,7 +1147,16 @@ mod tests {
             ..RunnerOptions::default()
         };
         let renderer = Arc::new(HandlebarsRenderer::new());
-        let runner = FlowRunner::new(config, None, renderer, options);
+        let (file_system, clock, telemetry) = test_deps();
+        let runner = FlowRunner::new(
+            config,
+            None,
+            renderer,
+            options,
+            file_system,
+            clock,
+            telemetry,
+        );
         let mut ctx = Context::new("demo", "demo");
         let step_id = ctx.ensure_root();
         ctx.metrics

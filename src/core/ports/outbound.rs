@@ -80,6 +80,8 @@ pub trait FileSystem: Send + Sync {
     fn write(&self, path: &Path, content: &str) -> Result<()>;
     /// Check if a file exists.
     fn exists(&self, path: &Path) -> bool;
+    /// Recursively create a directory if it does not exist.
+    fn create_dir_all(&self, path: &Path) -> Result<()>;
 }
 
 /// Abstraction for getting the current time.

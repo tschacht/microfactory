@@ -1,12 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use serde_yaml::Value;
+use serde_json::Value;
 use tree_sitter::{Parser, Tree};
 
-use crate::config::RedFlaggerConfig;
+use crate::core::domain::RedFlaggerDescriptor;
 use crate::core::error::Error as CoreError;
 use crate::core::ports::{LlmClient, LlmOptions, RedFlagger};
 use crate::utils::extract_xml_files;
@@ -25,7 +25,7 @@ pub struct RedFlagPipeline {
 
 impl RedFlagPipeline {
     pub fn from_configs(
-        configs: &[RedFlaggerConfig],
+        configs: &[RedFlaggerDescriptor],
         llm: Option<Arc<dyn LlmClient>>,
     ) -> Result<Self> {
         let mut flaggers: Vec<Box<dyn RedFlagger>> = Vec::new();
@@ -300,7 +300,7 @@ fn is_unbalanced(text: &str) -> bool {
     !stack.is_empty()
 }
 
-fn extract_usize(map: &BTreeMap<String, Value>, key: &str) -> Result<usize> {
+fn extract_usize(map: &HashMap<String, Value>, key: &str) -> Result<usize> {
     map.get(key)
         .context(format!("Missing red flagger parameter '{key}'"))?
         .as_u64()
@@ -308,7 +308,7 @@ fn extract_usize(map: &BTreeMap<String, Value>, key: &str) -> Result<usize> {
         .context(format!("Parameter '{key}' must be a positive integer"))
 }
 
-fn extract_string(map: &BTreeMap<String, Value>, key: &str) -> Result<String> {
+fn extract_string(map: &HashMap<String, Value>, key: &str) -> Result<String> {
     map.get(key)
         .context(format!("Missing red flagger parameter '{key}'"))?
         .as_str()
@@ -316,7 +316,7 @@ fn extract_string(map: &BTreeMap<String, Value>, key: &str) -> Result<String> {
         .context(format!("Parameter '{key}' must be a string"))
 }
 
-fn extract_bool(map: &BTreeMap<String, Value>, key: &str) -> Result<Option<bool>> {
+fn extract_bool(map: &HashMap<String, Value>, key: &str) -> Result<Option<bool>> {
     match map.get(key) {
         Some(val) => val
             .as_bool()
@@ -425,9 +425,9 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_builds_from_config() {
-        let configs = vec![RedFlaggerConfig {
+        let configs = vec![RedFlaggerDescriptor {
             kind: "length".into(),
-            params: BTreeMap::from([(String::from("max_tokens"), Value::from(2))]),
+            params: HashMap::from([(String::from("max_tokens"), Value::from(2))]),
         }];
         // Pass None for LLM since we don't use it in this config
         let pipeline = RedFlagPipeline::from_configs(&configs, None).unwrap();

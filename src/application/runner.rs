@@ -1,18 +1,17 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
-use handlebars::Handlebars;
 use tracing::{debug, info};
 
 use crate::{
-    config::{AgentDefinition, DomainConfig, MicrofactoryConfig},
-    context::{AgentConfig, AgentKind, Context, StepStatus, WaitState, WorkItem},
-    llm::LlmClient,
-    red_flaggers::RedFlagPipeline,
-    tasks::{
+    application::tasks::{
         ApplyVerifyTask, DecompositionTask, DecompositionVoteTask, MicroTask, NextAction,
         SolutionVoteTask, SolveTask, TaskEffect,
     },
+    config::{AgentDefinition, DomainConfig, MicrofactoryConfig},
+    context::{AgentConfig, AgentKind, Context, StepStatus, WaitState, WorkItem},
+    core::ports::{LlmClient, PromptRenderer},
+    red_flaggers::RedFlagPipeline,
 };
 
 /// Orchestrates MAKER-style workflows across decomposition, solving, and voting tasks.
@@ -20,22 +19,21 @@ pub struct FlowRunner {
     config: Arc<MicrofactoryConfig>,
     llm: Option<Arc<dyn LlmClient>>,
     options: RunnerOptions,
-    handlebars: Arc<Handlebars<'static>>,
+    renderer: Arc<dyn PromptRenderer>,
 }
 
 impl FlowRunner {
     pub fn new(
         config: Arc<MicrofactoryConfig>,
         llm: Option<Arc<dyn LlmClient>>,
+        renderer: Arc<dyn PromptRenderer>,
         options: RunnerOptions,
     ) -> Self {
-        let mut handlebars = Handlebars::new();
-        handlebars.set_strict_mode(false); // Allow missing variables for now
         Self {
             config,
             llm,
             options,
-            handlebars: Arc::new(handlebars),
+            renderer,
         }
     }
 
@@ -101,7 +99,7 @@ impl FlowRunner {
                         agent,
                         llm.clone(),
                         red_flag_pipeline.clone(),
-                        self.handlebars.clone(),
+                        self.renderer.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
@@ -128,7 +126,7 @@ impl FlowRunner {
                         agent,
                         llm.clone(),
                         vote_k,
-                        self.handlebars.clone(),
+                        self.renderer.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
@@ -195,7 +193,7 @@ impl FlowRunner {
                         agent,
                         llm.clone(),
                         red_flag_pipeline.clone(),
-                        self.handlebars.clone(),
+                        self.renderer.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
@@ -223,7 +221,7 @@ impl FlowRunner {
                         agent,
                         llm.clone(),
                         vote_k,
-                        self.handlebars.clone(),
+                        self.renderer.clone(),
                     );
                     let result = task.run(context).await?;
                     if let Some(outcome) =
@@ -529,11 +527,12 @@ impl Default for RunnerOptions {
 mod tests {
     use super::*;
     use crate::{
+        adapters::templating::HandlebarsRenderer,
         config::MicrofactoryConfig,
         context::{Context, StepStatus},
-        llm::LlmClient,
+        core::ports::{LlmClient, LlmOptions},
     };
-    use anyhow::{Result, anyhow};
+
     use async_trait::async_trait;
     use std::{collections::VecDeque, sync::Mutex};
 
@@ -551,28 +550,35 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for ScriptedLlm {
-        async fn sample(&self, prompt: &str, model: Option<&str>) -> Result<String> {
-            let mut single = self.sample_n(prompt, 1, model).await?;
-            Ok(single.pop().unwrap())
-        }
-
-        async fn sample_n(&self, _: &str, n: usize, _: Option<&str>) -> Result<Vec<String>> {
-            println!("Requesting {n} samples from scripted LLM");
+        async fn chat_completion(
+            &self,
+            _model: &str,
+            _prompt: &str,
+            _options: &LlmOptions,
+        ) -> crate::core::Result<String> {
             let mut guard = self.batches.lock().unwrap();
-            let batch = guard.pop_front().expect("no scripted responses left");
-            if batch.len() == n {
-                Ok(batch)
-            } else if batch.len() == 1 && n > 1 {
-                Ok(vec![batch[0].clone(); n])
-            } else {
-                Err(anyhow!("Scripted response length mismatch"))
+            let current_batch = guard.front_mut().ok_or_else(|| {
+                crate::core::error::Error::System("No scripted responses left".into())
+            })?;
+
+            if current_batch.is_empty() {
+                guard.pop_front();
+                if let Some(next) = guard.front_mut() {
+                    return Ok(next.remove(0));
+                } else {
+                    return Err(crate::core::error::Error::System(
+                        "No scripted responses left".into(),
+                    ));
+                }
             }
+
+            Ok(current_batch.remove(0))
         }
     }
 
     #[tokio::test]
     async fn executes_linear_flow_with_scripted_llm() {
-        let yaml = r#"
+        let yaml = r#"#
         domains:
           code:
             agents:
@@ -596,15 +602,24 @@ mod tests {
                 k: 2
         "#;
         let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml).unwrap());
+        // For N=2 samples, we expect 2 calls.
+        // Original script: vec!["..."] (batch).
+        // My mock logic: pop 1 item from batch per call.
         let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
+            // Decomposition (2 samples)
             vec![
                 "- step one\n- step two".into(),
                 "- step one\n- step two".into(),
             ],
+            // Vote (2 samples)
             vec!["1".into(), "1".into()],
+            // Solve (2 samples)
             vec!["solution one".into(), "solution one alt".into()],
+            // Vote (2 samples)
             vec!["1".into(), "1".into()],
+            // Solve 2 (2 samples)
             vec!["solution two".into(), "solution two alt".into()],
+            // Vote 2 (2 samples)
             vec!["2".into(), "2".into()],
         ]));
 
@@ -620,7 +635,8 @@ mod tests {
             step_by_step: false,
         };
 
-        let runner = FlowRunner::new(config, Some(llm), options);
+        let renderer = Arc::new(HandlebarsRenderer::new());
+        let runner = FlowRunner::new(config, Some(llm), renderer, options);
         let mut context = Context::new("Fix the bug", "code");
         let outcome = runner.execute(&mut context).await.unwrap();
         assert!(matches!(outcome, RunnerOutcome::Completed));
@@ -638,18 +654,28 @@ mod tests {
         let config = Arc::new(
             MicrofactoryConfig::from_path("config.yaml").expect("default config.yaml should load"),
         );
+        // 4 samples requested for solver by default in config? Or 10?
+        // Default RunnerOptions has samples=2.
+        // Config yaml might specify more. Analysis solver usually has samples: 10?
+        // Let's check the test expectation: "solver sampled four times"
+        // So we need 4 responses in that batch.
+
         let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
+            // Decomposition
             vec![
                 "- Produce executive-ready insight".into(),
                 "- Draft alternative plan".into(),
             ],
+            // Vote
             vec!["1".into(), "1".into()],
+            // Solver (4 samples expected based on assertion)
             vec![
                 "Finding A: adoption up 12%".into(),
                 "Finding B: adoption flat".into(),
                 "Finding C: adoption down".into(),
                 "Finding D: inconclusive".into(),
             ],
+            // Vote
             vec!["1".into(), "1".into()],
         ]));
 
@@ -657,7 +683,8 @@ mod tests {
             "Assess quarterly adoption trends for analytics rollout",
             "analysis",
         );
-        let runner = FlowRunner::new(config, Some(llm), RunnerOptions::default());
+        let renderer = Arc::new(HandlebarsRenderer::new());
+        let runner = FlowRunner::new(config, Some(llm), renderer, RunnerOptions::default());
         let outcome = runner.execute(&mut context).await.unwrap();
         assert!(matches!(outcome, RunnerOutcome::Completed));
 
@@ -682,7 +709,7 @@ mod tests {
 
     #[tokio::test]
     async fn executes_apply_verify_flow() {
-        let yaml = r#"
+        let yaml = r#"#
         domains:
           test_verify:
             agents:
@@ -714,7 +741,13 @@ mod tests {
         ]));
 
         let mut context = Context::new("Run verify", "test_verify");
-        let runner = FlowRunner::new(config, Some(llm), RunnerOptions::default());
+        let renderer = Arc::new(HandlebarsRenderer::new());
+        let options = RunnerOptions {
+            human_low_margin_threshold: 0,
+            default_samples: 1,
+            ..RunnerOptions::default()
+        };
+        let runner = FlowRunner::new(config, Some(llm), renderer, options);
         let outcome = runner.execute(&mut context).await.unwrap();
         assert!(matches!(outcome, RunnerOutcome::Completed));
 
@@ -729,7 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn respects_agent_specific_red_flaggers() {
-        let yaml = r#"
+        let yaml = r#"#
         domains:
           strict_check:
             agents:
@@ -765,7 +798,8 @@ mod tests {
             human_red_flag_threshold: 1, // Pause immediately on flag
             ..RunnerOptions::default()
         };
-        let runner = FlowRunner::new(config, Some(llm), options);
+        let renderer = Arc::new(HandlebarsRenderer::new());
+        let runner = FlowRunner::new(config, Some(llm), renderer, options);
 
         // Execute
         let outcome = runner.execute(&mut context).await.unwrap();
@@ -784,7 +818,7 @@ mod tests {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
         // Setup minimal config
-        let yaml = r#"
+        let yaml = r#"#
         domains:
           step_check:
             agents:
@@ -822,7 +856,8 @@ mod tests {
             human_low_margin_threshold: 0,
             ..RunnerOptions::default()
         };
-        let runner = FlowRunner::new(config, Some(llm), options);
+        let renderer = Arc::new(HandlebarsRenderer::new());
+        let runner = FlowRunner::new(config, Some(llm), renderer, options);
 
         // 1. First run: Should reach Decomposition Vote and then Pause
         let outcome1 = runner.execute(&mut context).await.unwrap();
@@ -853,7 +888,7 @@ mod tests {
 
     #[test]
     fn low_margin_threshold_zero_disables_pause() {
-        let yaml = r#"
+        let yaml = r#"#
         domains:
           demo:
             agents:
@@ -875,7 +910,8 @@ mod tests {
             human_low_margin_threshold: 0,
             ..RunnerOptions::default()
         };
-        let runner = FlowRunner::new(config, None, options);
+        let renderer = Arc::new(HandlebarsRenderer::new());
+        let runner = FlowRunner::new(config, None, renderer, options);
         let mut ctx = Context::new("demo", "demo");
         let step_id = ctx.ensure_root();
         ctx.metrics
@@ -887,7 +923,7 @@ mod tests {
 
     #[test]
     fn positive_threshold_pauses_when_margin_is_low() {
-        let yaml = r#"
+        let yaml = r#"#
         domains:
           demo:
             agents:
@@ -909,7 +945,8 @@ mod tests {
             human_low_margin_threshold: 2,
             ..RunnerOptions::default()
         };
-        let runner = FlowRunner::new(config, None, options);
+        let renderer = Arc::new(HandlebarsRenderer::new());
+        let runner = FlowRunner::new(config, None, renderer, options);
         let mut ctx = Context::new("demo", "demo");
         let step_id = ctx.ensure_root();
         ctx.metrics
@@ -921,7 +958,7 @@ mod tests {
 
     #[test]
     fn positive_threshold_allows_decisive_votes() {
-        let yaml = r#"
+        let yaml = r#"#
         domains:
           demo:
             agents:
@@ -943,7 +980,8 @@ mod tests {
             human_low_margin_threshold: 1,
             ..RunnerOptions::default()
         };
-        let runner = FlowRunner::new(config, None, options);
+        let renderer = Arc::new(HandlebarsRenderer::new());
+        let runner = FlowRunner::new(config, None, renderer, options);
         let mut ctx = Context::new("demo", "demo");
         let step_id = ctx.ensure_root();
         ctx.metrics

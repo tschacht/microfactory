@@ -7,7 +7,8 @@ use serde_yaml::Value;
 use tree_sitter::{Parser, Tree};
 
 use crate::config::RedFlaggerConfig;
-use crate::llm::LlmClient;
+use crate::core::error::Error as CoreError;
+use crate::core::ports::{LlmClient, LlmOptions, RedFlagger};
 use crate::utils::extract_xml_files;
 
 /// Describes a single red-flag incident that caused a sample to be rejected.
@@ -15,12 +16,6 @@ use crate::utils::extract_xml_files;
 pub struct RedFlagMatch {
     pub flagger: String,
     pub reason: String,
-}
-
-#[async_trait]
-pub trait RedFlagger: Send + Sync {
-    fn name(&self) -> &str;
-    async fn flag(&self, candidate: &str) -> Result<Option<String>>;
 }
 
 #[derive(Default)]
@@ -72,14 +67,11 @@ impl RedFlagPipeline {
     pub async fn evaluate(&self, candidate: &str) -> Vec<RedFlagMatch> {
         let mut matches = Vec::new();
         for flagger in &self.flaggers {
-            match flagger.flag(candidate).await {
-                Ok(Some(reason)) => {
-                    matches.push(RedFlagMatch {
-                        flagger: flagger.name().to_string(),
-                        reason,
-                    });
+            match flagger.check(candidate).await {
+                Ok(()) => {}
+                Err(CoreError::RedFlag { flagger: f, reason }) => {
+                    matches.push(RedFlagMatch { flagger: f, reason });
                 }
-                Ok(None) => {}
                 Err(e) => {
                     tracing::warn!(
                         flagger = flagger.name(),
@@ -107,15 +99,18 @@ impl RedFlagger for LengthRedFlagger {
         "length"
     }
 
-    async fn flag(&self, candidate: &str) -> Result<Option<String>> {
+    async fn check(&self, candidate: &str) -> crate::core::Result<()> {
         let tokens = candidate.split_whitespace().count();
         if tokens > self.max_tokens {
-            Ok(Some(format!(
-                "response used {tokens} tokens exceeding limit {}",
-                self.max_tokens
-            )))
+            Err(CoreError::RedFlag {
+                flagger: self.name().into(),
+                reason: format!(
+                    "response used {tokens} tokens exceeding limit {}",
+                    self.max_tokens
+                ),
+            })
         } else {
-            Ok(None)
+            Ok(())
         }
     }
 }
@@ -131,25 +126,35 @@ impl RedFlagger for SyntaxRedFlagger {
         "syntax"
     }
 
-    async fn flag(&self, candidate: &str) -> Result<Option<String>> {
+    async fn check(&self, candidate: &str) -> crate::core::Result<()> {
         if self.extract_xml {
             let files = extract_xml_files(candidate);
             if !files.is_empty() {
                 for (path, content) in files {
                     let lang = infer_language(&path).unwrap_or(&self.language);
-                    if let Some(error) = check_syntax(&content, lang)? {
-                        return Ok(Some(format!("Syntax error in {path}: {error}")));
+                    if let Some(error) = check_syntax(&content, lang)
+                        .map_err(|e| CoreError::System(e.to_string()))?
+                    {
+                        return Err(CoreError::RedFlag {
+                            flagger: self.name().into(),
+                            reason: format!("Syntax error in {path}: {error}"),
+                        });
                     }
                 }
-                return Ok(None);
+                return Ok(());
             }
         }
 
-        // Fallback: check the entire candidate as the configured language
-        if let Some(error) = check_syntax(candidate, &self.language)? {
-            Ok(Some(error))
+        // Fallback
+        if let Some(error) =
+            check_syntax(candidate, &self.language).map_err(|e| CoreError::System(e.to_string()))?
+        {
+            Err(CoreError::RedFlag {
+                flagger: self.name().into(),
+                reason: error,
+            })
         } else {
-            Ok(None)
+            Ok(())
         }
     }
 }
@@ -162,7 +167,7 @@ fn infer_language(path: &str) -> Option<&str> {
     } else if path.ends_with(".java") {
         Some("java")
     } else if path.ends_with(".js") || path.ends_with(".ts") {
-        Some("javascript") // Note: we might need to add JS support if we want it, but for now it falls back or fails if not in check_syntax
+        Some("javascript")
     } else {
         None
     }
@@ -245,16 +250,26 @@ impl RedFlagger for LlmRedFlagger {
         "llm_critique"
     }
 
-    async fn flag(&self, candidate: &str) -> Result<Option<String>> {
+    async fn check(&self, candidate: &str) -> crate::core::Result<()> {
         let prompt = self.prompt_template.replace("{{candidate}}", candidate);
-        let response = self.client.sample(&prompt, Some(&self.model)).await?;
+        let response = self
+            .client
+            .chat_completion(&self.model, &prompt, &LlmOptions::default())
+            .await
+            .map_err(|e| CoreError::LlmProvider {
+                provider: "unknown".into(),
+                details: e.to_string(),
+                retryable: true,
+            })?;
+
         let trimmed = response.trim().to_lowercase();
-        // Expecting the LLM to say "yes" if it's bad, or "no" if it's good, or some structured output.
-        // Let's assume the prompt asks "Is this code invalid? Answer YES or NO."
         if trimmed.starts_with("yes") {
-            Ok(Some(format!("LLM critique flagged content: {response}")))
+            Err(CoreError::RedFlag {
+                flagger: self.name().into(),
+                reason: format!("LLM critique flagged content: {response}"),
+            })
         } else {
-            Ok(None)
+            Ok(())
         }
     }
 }
@@ -318,8 +333,8 @@ mod tests {
     #[tokio::test]
     async fn length_flagger_detects_overflow() {
         let flagger = LengthRedFlagger { max_tokens: 3 };
-        assert!(flagger.flag("one two three four").await.unwrap().is_some());
-        assert!(flagger.flag("one two").await.unwrap().is_none());
+        assert!(flagger.check("one two three four").await.is_err());
+        assert!(flagger.check("one two").await.is_ok());
     }
 
     #[tokio::test]
@@ -328,31 +343,19 @@ mod tests {
             language: "python".into(),
             extract_xml: false,
         };
-        // Invalid Python: missing colon
-        assert!(flagger.flag("def foo() pass").await.unwrap().is_some());
+        // Invalid Python
+        assert!(flagger.check("def foo() pass").await.is_err());
         // Valid Python
-        assert!(flagger.flag("def foo(): pass").await.unwrap().is_none());
+        assert!(flagger.check("def foo(): pass").await.is_ok());
 
         let rust_flagger = SyntaxRedFlagger {
             language: "rust".into(),
             extract_xml: false,
         };
         // Invalid Rust: missing semicolon
-        assert!(
-            rust_flagger
-                .flag("fn main() { let x = 1 }")
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(rust_flagger.check("fn main() { let x = 1 }").await.is_err());
         // Valid Rust
-        assert!(
-            rust_flagger
-                .flag("fn main() { let x = 1; }")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(rust_flagger.check("fn main() { let x = 1; }").await.is_ok());
 
         let java_flagger = SyntaxRedFlagger {
             language: "java".into(),
@@ -361,18 +364,16 @@ mod tests {
         // Invalid Java: missing semicolon
         assert!(
             java_flagger
-                .flag("class Main { void main() { int x = 1 } }")
+                .check("class Main { void main() { int x = 1 } }")
                 .await
-                .unwrap()
-                .is_some()
+                .is_err()
         );
         // Valid Java
         assert!(
             java_flagger
-                .flag("class Main { void main() { int x = 1; } }")
+                .check("class Main { void main() { int x = 1; } }")
                 .await
-                .unwrap()
-                .is_none()
+                .is_ok()
         );
     }
 
@@ -389,16 +390,15 @@ mod tests {
                 pass
             </file>
         "#;
-        assert!(flagger.flag(valid_xml).await.unwrap().is_none());
+        assert!(flagger.check(valid_xml).await.is_ok());
 
         let invalid_xml = r#"
             <file path="script.py">
             def foo() pass
             </file>
         "#;
-        let err = flagger.flag(invalid_xml).await.unwrap();
-        assert!(err.is_some());
-        assert!(err.unwrap().contains("Syntax error in script.py"));
+        let err = flagger.check(invalid_xml).await.unwrap_err();
+        assert!(err.to_string().contains("Syntax error in script.py"));
 
         // Mixed languages
         let mixed_xml = r#"
@@ -409,7 +409,7 @@ mod tests {
             fn main() { let x = 1; }
             </file>
         "#;
-        assert!(flagger.flag(mixed_xml).await.unwrap().is_none());
+        assert!(flagger.check(mixed_xml).await.is_ok());
 
         let mixed_invalid_xml = r#"
             <file path="script.py">
@@ -419,9 +419,8 @@ mod tests {
             fn main() { let x = 1 }
             </file>
         "#;
-        let err = flagger.flag(mixed_invalid_xml).await.unwrap();
-        assert!(err.is_some());
-        assert!(err.unwrap().contains("Syntax error in main.rs"));
+        let err = flagger.check(mixed_invalid_xml).await.unwrap_err();
+        assert!(err.to_string().contains("Syntax error in main.rs"));
     }
 
     #[tokio::test]
@@ -430,6 +429,7 @@ mod tests {
             kind: "length".into(),
             params: BTreeMap::from([(String::from("max_tokens"), Value::from(2))]),
         }];
+        // Pass None for LLM since we don't use it in this config
         let pipeline = RedFlagPipeline::from_configs(&configs, None).unwrap();
         let matches = pipeline.evaluate("one two three").await;
         assert_eq!(matches.len(), 1);
@@ -441,7 +441,12 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for MockLlm {
-        async fn sample(&self, _prompt: &str, _model: Option<&str>) -> Result<String> {
+        async fn chat_completion(
+            &self,
+            _model: &str,
+            _prompt: &str,
+            _options: &LlmOptions,
+        ) -> crate::core::Result<String> {
             Ok(self.response.clone())
         }
     }
@@ -456,9 +461,8 @@ mod tests {
             model: "test-model".into(),
             prompt_template: "Critique: {{candidate}}".into(),
         };
-        let result = flagger.flag("bad code").await.unwrap();
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("LLM critique flagged"));
+        let result = flagger.check("bad code").await.unwrap_err();
+        assert!(result.to_string().contains("LLM critique flagged"));
     }
 
     #[tokio::test]
@@ -471,7 +475,7 @@ mod tests {
             model: "test-model".into(),
             prompt_template: "Critique: {{candidate}}".into(),
         };
-        let result = flagger.flag("good code").await.unwrap();
-        assert!(result.is_none());
+        let result = flagger.check("good code").await;
+        assert!(result.is_ok());
     }
 }

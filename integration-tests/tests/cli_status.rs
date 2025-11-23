@@ -1,8 +1,8 @@
 use anyhow::Result;
 use assert_cmd::Command;
 use microfactory::{
+    adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
     context::Context,
-    persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
     status_export::SessionListExport,
 };
 use tempfile::tempdir;

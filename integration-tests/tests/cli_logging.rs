@@ -2,8 +2,8 @@
 
 use assert_cmd::Command;
 use microfactory::{
+    adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
     context::Context,
-    persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
 };
 use predicates::prelude::*;
 use std::{io::Write, path::Path};

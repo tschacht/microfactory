@@ -2,7 +2,6 @@ use std::{collections::HashMap, fmt::Write as _, sync::Arc, time::Instant};
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
 use async_trait::async_trait;
-use handlebars::Handlebars;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
@@ -12,7 +11,7 @@ use crate::{
     context::{
         AgentConfig, AgentKind, Context, DecompositionProposal, RedFlagIncident, StepStatus,
     },
-    llm::LlmClient,
+    core::ports::{LlmClient, LlmOptions, PromptRenderer},
     red_flaggers::{RedFlagMatch, RedFlagPipeline},
     utils::extract_xml_files,
 };
@@ -67,7 +66,7 @@ pub struct DecompositionTask {
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
     red_flags: Arc<RedFlagPipeline>,
-    handlebars: Arc<Handlebars<'static>>,
+    renderer: Arc<dyn PromptRenderer>,
 }
 
 impl DecompositionTask {
@@ -77,7 +76,7 @@ impl DecompositionTask {
         agent: AgentConfig,
         llm: Arc<dyn LlmClient>,
         red_flags: Arc<RedFlagPipeline>,
-        handlebars: Arc<Handlebars<'static>>,
+        renderer: Arc<dyn PromptRenderer>,
     ) -> Self {
         Self {
             step_id,
@@ -85,7 +84,7 @@ impl DecompositionTask {
             agent,
             llm,
             red_flags,
-            handlebars,
+            renderer,
         }
     }
 }
@@ -96,7 +95,7 @@ impl MicroTask for DecompositionTask {
         let start = Instant::now();
         let samples = self.agent.samples.max(1);
         let rendered_prompt = render_prompt(
-            &self.handlebars,
+            &self.renderer,
             &self.agent.prompt_template,
             &self.prompt,
             "decomposition",
@@ -147,7 +146,7 @@ pub struct DecompositionVoteTask {
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
     vote_k: usize,
-    handlebars: Arc<Handlebars<'static>>,
+    renderer: Arc<dyn PromptRenderer>,
 }
 
 impl DecompositionVoteTask {
@@ -156,14 +155,14 @@ impl DecompositionVoteTask {
         agent: AgentConfig,
         llm: Arc<dyn LlmClient>,
         vote_k: usize,
-        handlebars: Arc<Handlebars<'static>>,
+        renderer: Arc<dyn PromptRenderer>,
     ) -> Self {
         Self {
             step_id,
             agent,
             llm,
             vote_k,
-            handlebars,
+            renderer,
         }
     }
 }
@@ -183,16 +182,19 @@ impl MicroTask for DecompositionVoteTask {
                 .collect::<Vec<_>>(),
         );
         let rendered_prompt = render_prompt(
-            &self.handlebars,
+            &self.renderer,
             &self.agent.prompt_template,
             &prompt_body,
             "decomposition_vote",
         )?;
         let samples = self.agent.samples.max(1);
-        let raw_votes = self
-            .llm
-            .sample_n(&rendered_prompt, samples, Some(self.agent.model.as_str()))
-            .await?;
+        let raw_votes = sample_n(
+            &self.llm,
+            &rendered_prompt,
+            samples,
+            self.agent.model.as_str(),
+        )
+        .await?;
         let mut votes = Vec::new();
         for raw in raw_votes {
             if let Some(choice) = parse_vote_response(&raw, proposals.len()) {
@@ -241,7 +243,7 @@ pub struct SolveTask {
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
     red_flags: Arc<RedFlagPipeline>,
-    handlebars: Arc<Handlebars<'static>>,
+    renderer: Arc<dyn PromptRenderer>,
 }
 
 impl SolveTask {
@@ -250,14 +252,14 @@ impl SolveTask {
         agent: AgentConfig,
         llm: Arc<dyn LlmClient>,
         red_flags: Arc<RedFlagPipeline>,
-        handlebars: Arc<Handlebars<'static>>,
+        renderer: Arc<dyn PromptRenderer>,
     ) -> Self {
         Self {
             step_id,
             agent,
             llm,
             red_flags,
-            handlebars,
+            renderer,
         }
     }
 }
@@ -270,7 +272,7 @@ impl MicroTask for SolveTask {
             .step(self.step_id)
             .with_context(|| format!("Unknown step {}", self.step_id))?;
         let prompt = render_prompt(
-            &self.handlebars,
+            &self.renderer,
             &self.agent.prompt_template,
             &step.description,
             "solve",
@@ -306,7 +308,7 @@ pub struct SolutionVoteTask {
     agent: AgentConfig,
     llm: Arc<dyn LlmClient>,
     vote_k: usize,
-    handlebars: Arc<Handlebars<'static>>,
+    renderer: Arc<dyn PromptRenderer>,
 }
 
 impl SolutionVoteTask {
@@ -315,14 +317,14 @@ impl SolutionVoteTask {
         agent: AgentConfig,
         llm: Arc<dyn LlmClient>,
         vote_k: usize,
-        handlebars: Arc<Handlebars<'static>>,
+        renderer: Arc<dyn PromptRenderer>,
     ) -> Self {
         Self {
             step_id,
             agent,
             llm,
             vote_k,
-            handlebars,
+            renderer,
         }
     }
 }
@@ -336,16 +338,14 @@ impl MicroTask for SolutionVoteTask {
             .with_context(|| format!("No solutions queued for step {}", self.step_id))?;
         let prompt_body = enumerate_options(solutions.clone());
         let vote_prompt = render_prompt(
-            &self.handlebars,
+            &self.renderer,
             &self.agent.prompt_template,
             &prompt_body,
             "solution_vote",
         )?;
         let samples = self.agent.samples.max(1);
-        let raw_votes = self
-            .llm
-            .sample_n(&vote_prompt, samples, Some(self.agent.model.as_str()))
-            .await?;
+        let raw_votes =
+            sample_n(&self.llm, &vote_prompt, samples, self.agent.model.as_str()).await?;
         let mut votes = Vec::new();
         for raw in raw_votes {
             if let Some(choice) = parse_vote_response(&raw, solutions.len()) {
@@ -436,7 +436,6 @@ impl MicroTask for ApplyVerifyTask {
                         match validate_target_path(&path_str) {
                             Ok(safe_path) => {
                                 let real_path = if let Some(root) = &ctx.output_dir {
-                                    // Ensure output directory exists
                                     std::fs::create_dir_all(root).ok();
                                     root.join(&safe_path)
                                 } else {
@@ -490,7 +489,6 @@ impl MicroTask for ApplyVerifyTask {
                                     extract_code_content(step.winning_solution.as_ref().unwrap());
 
                                 let real_path = if let Some(root) = &ctx.output_dir {
-                                    // Ensure output directory exists
                                     std::fs::create_dir_all(root).ok();
                                     root.join(&safe_path)
                                 } else {
@@ -538,11 +536,9 @@ impl MicroTask for ApplyVerifyTask {
                     command = applier_cmd,
                     "Running applier command"
                 );
-                // In a real implementation, we'd pipe the solution to the command
             }
         }
 
-        // Verify
         let mut verified = true;
         if let Some(verifier_cmd) = &self.verifier {
             info!(
@@ -589,7 +585,7 @@ impl MicroTask for ApplyVerifyTask {
 }
 
 fn render_prompt(
-    handlebars: &Handlebars,
+    renderer: &Arc<dyn PromptRenderer>,
     template: &str,
     body: &str,
     role: &str,
@@ -600,9 +596,35 @@ fn render_prompt(
         "role": role,
     });
 
-    handlebars
-        .render_template(template, &data)
+    renderer
+        .render(template, &data)
         .with_context(|| format!("Failed to render prompt template for role '{role}'"))
+        .map_err(|e| anyhow!(e))
+}
+
+async fn sample_n(
+    llm: &Arc<dyn LlmClient>,
+    prompt: &str,
+    n: usize,
+    model: &str,
+) -> Result<Vec<String>> {
+    let mut join_set = JoinSet::new();
+    for _ in 0..n {
+        let llm = llm.clone();
+        let prompt = prompt.to_string();
+        let model = model.to_string();
+        join_set.spawn(async move {
+            llm.chat_completion(&model, &prompt, &LlmOptions::default())
+                .await
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(res) = join_set.join_next().await {
+        let val = res.context("LLM task panic")?.map_err(|e| anyhow!(e))?;
+        results.push(val);
+    }
+    Ok(results)
 }
 
 fn parse_subtasks(raw: &str) -> Vec<String> {
@@ -720,10 +742,7 @@ impl<'ctx> SampleCollector<'ctx> {
         }
 
         if self.pipeline.is_empty() {
-            let responses = self
-                .llm
-                .sample_n(&prompt, target_samples, Some(model))
-                .await?;
+            let responses = sample_n(&self.llm, &prompt, target_samples, model).await?;
             self.ctx
                 .metrics
                 .record_samples(self.step_id, responses.len(), responses.len());
@@ -742,7 +761,7 @@ impl<'ctx> SampleCollector<'ctx> {
         while accepted.len() < target_samples {
             attempts += 1;
             let remaining = target_samples - accepted.len();
-            let batch = self.llm.sample_n(&prompt, remaining, Some(model)).await?;
+            let batch = sample_n(&self.llm, &prompt, remaining, model).await?;
             let batch_len = batch.len();
             let before = accepted.len();
             let mut flagged_this_round = 0usize;
@@ -882,13 +901,9 @@ fn majority_vote(votes: &[usize]) -> Option<usize> {
 
 fn validate_target_path(raw: &str) -> Result<std::path::PathBuf> {
     let path = std::path::Path::new(raw);
-
-    // 1. Must be relative
     if path.is_absolute() {
         return Err(anyhow!("Absolute paths are forbidden: {raw}"));
     }
-
-    // 2. Must not contain traversal (..)
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => {
@@ -902,18 +917,13 @@ fn validate_target_path(raw: &str) -> Result<std::path::PathBuf> {
             _ => {}
         }
     }
-
-    // 3. Check for .git in path string too (to catch hidden .git inside filenames if OS allows)
-    // Just standard component check above covers `.git` folder, but let's be safe.
     if raw.contains("/.git/") || raw.starts_with(".git/") || raw == ".git" {
         return Err(anyhow!("Modifying .git directory is forbidden: {raw}"));
     }
-
     Ok(path.to_path_buf())
 }
 
 fn extract_target_path(description: &str) -> Option<String> {
-    // Heuristic: find first token that looks like a file path
     for token in description.split_whitespace() {
         let clean = token.trim_matches(|c| {
             c == '(' || c == ')' || c == ':' || c == ',' || c == '\'' || c == '"'
@@ -930,7 +940,6 @@ fn extract_code_content(raw: &str) -> String {
         let rest = &raw[start + 3..];
         if let Some(end) = rest.find("```") {
             let code_block = &rest[..end];
-            // skip language identifier line if present
             if let Some(newline) = code_block.find('\n') {
                 return code_block[newline + 1..].to_string();
             }
@@ -946,7 +955,10 @@ mod tests {
     use crate::{config::RedFlaggerConfig, context::Context, red_flaggers::RedFlagPipeline};
     use async_trait::async_trait;
     use serde_yaml::Value;
-    use std::{collections::BTreeMap, sync::Mutex};
+    use std::{
+        collections::{BTreeMap, VecDeque},
+        sync::Mutex,
+    };
 
     #[test]
     fn parses_subtasks_from_bullets() {
@@ -1019,29 +1031,42 @@ mod tests {
     #[tokio::test]
     async fn red_flags_trigger_resample() {
         struct ScriptedLlm {
-            batches: Mutex<Vec<Vec<String>>>,
+            batches: Mutex<VecDeque<Vec<String>>>,
         }
 
         impl ScriptedLlm {
             fn new(batches: Vec<Vec<String>>) -> Self {
                 Self {
-                    batches: Mutex::new(batches),
+                    batches: Mutex::new(batches.into_iter().collect()),
                 }
             }
         }
 
         #[async_trait]
         impl LlmClient for ScriptedLlm {
-            async fn sample(&self, _: &str, _: Option<&str>) -> Result<String> {
-                let mut values = self.sample_n("", 1, None).await?;
-                Ok(values.remove(0))
-            }
-
-            async fn sample_n(&self, _: &str, n: usize, _: Option<&str>) -> Result<Vec<String>> {
+            async fn chat_completion(
+                &self,
+                _model: &str,
+                _prompt: &str,
+                _options: &LlmOptions,
+            ) -> crate::core::Result<String> {
                 let mut guard = self.batches.lock().unwrap();
-                let batch = guard.remove(0);
-                assert_eq!(batch.len(), n);
-                Ok(batch)
+                let current_batch = guard.front_mut().ok_or_else(|| {
+                    crate::core::error::Error::System("No scripted responses left".into())
+                })?;
+
+                if current_batch.is_empty() {
+                    guard.pop_front();
+                    if let Some(next) = guard.front_mut() {
+                        return Ok(next.remove(0));
+                    } else {
+                        return Err(crate::core::error::Error::System(
+                            "No scripted responses left".into(),
+                        ));
+                    }
+                }
+
+                Ok(current_batch.remove(0))
             }
         }
 

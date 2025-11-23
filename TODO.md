@@ -82,7 +82,7 @@ Each task should include:
     - Ensure token usage metrics are captured correctly for streams.
 
 ### TASK-014: Layered Ring/Clean Architecture
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Priority**: Medium
 - **Dependencies**: _None_
 - **Context**: Flow orchestration, domain state, and adapters are currently interleaved, which makes it harder to test in isolation or swap implementations (LLM provider, persistence, templating). Adopting a hexagonal/ring structure will clarify responsibilities and let inner logic evolve independently.

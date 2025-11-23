@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    adapters::persistence::{SessionMetadata, SessionRecord, SessionSummary},
     context::{Context, WaitState, WorkflowMetrics},
-    persistence::{SessionMetadata, SessionRecord, SessionSummary},
 };
 
 #[derive(Serialize, Deserialize, Clone)]

@@ -21,7 +21,7 @@ use tokio_stream::{StreamExt, wrappers::IntervalStream};
 use tracing::info;
 
 use crate::{
-    persistence::{SessionRecord, SessionStatus, SessionStore},
+    adapters::persistence::{SessionRecord, SessionStatus, SessionStore},
     status_export::{SessionDetailExport, SessionListExport},
 };
 
@@ -218,8 +218,8 @@ async fn stream_sessions_handler(State(state): State<Arc<ServeState>>) -> impl I
 mod tests {
     use super::*;
     use crate::{
+        adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus},
         context::Context,
-        persistence::{SessionEnvelope, SessionMetadata, SessionStatus},
     };
     use axum::body::Body;
     use tempfile::tempdir;

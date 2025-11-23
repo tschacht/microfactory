@@ -12,15 +12,17 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use microfactory::{
+    adapters::llm::RigLlmClient,
+    adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
+    adapters::templating::HandlebarsRenderer,
     cli::{
         Cli, Commands, HelpArgs, HelpFormat, HelpTopic, LlmProvider, ResumeArgs, RunArgs,
         ServeArgs, StatusArgs, SubprocessArgs,
     },
     config::MicrofactoryConfig,
     context::{Context, StepMetrics, WorkItem},
-    llm::{LlmClient, RigLlmClient},
+    core::ports::LlmClient,
     paths,
-    persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
     server::{self, ServeOptions},
     status_export::{SessionDetailExport, SessionListExport, count_completed_steps},
@@ -137,7 +139,8 @@ async fn run_command(args: RunArgs, session_id: String) -> Result<()> {
     };
     store.save(&envelope, SessionStatus::Running)?;
 
-    let runner = FlowRunner::new(config, Some(llm_client), runner_options);
+    let renderer = Arc::new(HandlebarsRenderer::new());
+    let runner = FlowRunner::new(config, Some(llm_client), renderer, runner_options);
     match runner.execute(&mut context).await {
         Ok(outcome) => {
             envelope.context = context.clone();
@@ -298,7 +301,8 @@ async fn resume_command(args: ResumeArgs) -> Result<()> {
     };
     store.save(&envelope, SessionStatus::Running)?;
 
-    let runner = FlowRunner::new(config, Some(llm_client), runner_options);
+    let renderer = Arc::new(HandlebarsRenderer::new());
+    let runner = FlowRunner::new(config, Some(llm_client), renderer, runner_options);
     match runner.execute(&mut context).await {
         Ok(outcome) => {
             envelope.context = context.clone();
@@ -362,7 +366,8 @@ async fn subprocess_command(args: SubprocessArgs, session_id: String) -> Result<
     context.enqueue_work(WorkItem::SolutionVote { step_id: root_id });
 
     let runner_options = RunnerOptions::from_cli(args.samples, args.k, false, false, 1);
-    let runner = FlowRunner::new(config, Some(llm_client), runner_options);
+    let renderer = Arc::new(HandlebarsRenderer::new());
+    let runner = FlowRunner::new(config, Some(llm_client), renderer, runner_options);
     match runner.execute(&mut context).await? {
         RunnerOutcome::Completed => {
             let step = context
@@ -874,7 +879,13 @@ async fn run_dry_run_probe(args: &RunArgs, llm: Arc<dyn LlmClient>) -> Result<()
         "[dry-run] probing model '{}' with prompt...",
         args.llm_model
     );
-    let response = llm.sample(&args.prompt, Some(&args.llm_model)).await?;
+    let response = llm
+        .chat_completion(
+            &args.llm_model,
+            &args.prompt,
+            &microfactory::core::ports::LlmOptions::default(),
+        )
+        .await?;
     println!("--- LLM Response Start ---\n{response}\n--- LLM Response End ---");
     Ok(())
 }
@@ -914,7 +925,7 @@ fn ensure_domain_exists(config: &Arc<MicrofactoryConfig>, domain: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::anyhow;
+
     use async_trait::async_trait;
     use std::{fs, path::PathBuf, sync::Arc};
     use tempfile::tempdir;
@@ -943,8 +954,13 @@ mod tests {
 
         #[async_trait]
         impl LlmClient for FailingClient {
-            async fn sample(&self, _: &str, _: Option<&str>) -> Result<String> {
-                Err(anyhow!("boom"))
+            async fn chat_completion(
+                &self,
+                _: &str,
+                _: &str,
+                _: &microfactory::core::ports::LlmOptions,
+            ) -> microfactory::core::Result<String> {
+                Err(microfactory::core::error::Error::System("boom".into()))
             }
         }
 

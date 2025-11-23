@@ -7,6 +7,8 @@ use rig::completion::Prompt;
 use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::cli::LlmProvider;
+use crate::core::error::Error as CoreError;
+use crate::core::ports::{LlmClient as CoreLlmClient, LlmOptions};
 
 /// Abstraction over whichever LLM backend is configured.
 #[async_trait]
@@ -126,6 +128,56 @@ impl LlmClient for RigLlmClient {
         }
 
         Ok(outputs)
+    }
+}
+
+#[async_trait]
+impl CoreLlmClient for RigLlmClient {
+    async fn chat_completion(
+        &self,
+        model: &str,
+        prompt: &str,
+        options: &LlmOptions,
+    ) -> crate::core::Result<String> {
+        let _permit = self
+            .inner
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| CoreError::System(format!("Semaphore error: {e}")))?;
+
+        let agent = {
+            let builder = DynClientBuilder::new();
+            let mut agent_builder = builder
+                .agent_with_api_key_val(
+                    self.inner.provider.provider_id(),
+                    model,
+                    ProviderValue::Simple(self.inner.api_key.clone()),
+                )
+                .map_err(|err| CoreError::LlmProvider {
+                    provider: self.inner.provider.as_str().to_string(),
+                    details: format!("Failed to create agent: {err}"),
+                    retryable: false,
+                })?;
+
+            if let Some(temp) = options.temperature {
+                agent_builder = agent_builder.temperature(f64::from(temp));
+            }
+
+            agent_builder.build()
+        };
+
+        let response = agent
+            .prompt(prompt)
+            .await
+            .map_err(|err| CoreError::LlmProvider {
+                provider: self.inner.provider.as_str().to_string(),
+                details: err.to_string(),
+                retryable: true,
+            })?;
+
+        Ok(response)
     }
 }
 

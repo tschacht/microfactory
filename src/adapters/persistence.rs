@@ -5,10 +5,18 @@ use std::{
 };
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
+use async_trait::async_trait;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{context::Context, paths::data_dir};
+use crate::{
+    context::Context,
+    core::{
+        error::Error as CoreError,
+        ports::{SessionLoadResponse, SessionRepository, SessionSaveRequest},
+    },
+    paths::data_dir,
+};
 
 /// Metadata captured alongside a persisted workflow context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +242,145 @@ fn timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|dur| dur.as_secs() as i64)
         .unwrap_or_default()
+}
+
+#[async_trait]
+impl SessionRepository for SessionStore {
+    async fn save_session(&self, request: &SessionSaveRequest) -> crate::core::Result<()> {
+        let store = self.clone();
+        let request = request.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = store
+                .connect()
+                .map_err(|e| CoreError::Persistence(e.to_string()))?;
+            let now = timestamp();
+            conn.execute(
+                r#"
+            INSERT INTO sessions (session_id, domain, prompt, status, context_json, metadata_json, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(session_id)
+            DO UPDATE SET
+                domain=excluded.domain,
+                prompt=excluded.prompt,
+                status=excluded.status,
+                context_json=excluded.context_json,
+                metadata_json=excluded.metadata_json,
+                updated_at=excluded.updated_at
+            "#,
+                params![
+                    request.session_id,
+                    request.domain,
+                    request.prompt,
+                    request.status,
+                    request.context_json,
+                    request.metadata_json,
+                    now
+                ],
+            )
+            .map_err(|e| CoreError::Persistence(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CoreError::System(format!("Join error: {e}")))?
+    }
+
+    async fn load_session(
+        &self,
+        session_id: &str,
+    ) -> crate::core::Result<Option<SessionLoadResponse>> {
+        let store = self.clone();
+        let session_id = session_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = store
+                .connect()
+                .map_err(|e| CoreError::Persistence(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    r#"
+                SELECT domain, prompt, status, context_json, metadata_json, updated_at
+                FROM sessions
+                WHERE session_id = ?1
+                "#,
+                )
+                .map_err(|e| CoreError::Persistence(e.to_string()))?;
+
+            let mut rows = stmt
+                .query(params![session_id])
+                .map_err(|e| CoreError::Persistence(e.to_string()))?;
+
+            if let Some(row) = rows
+                .next()
+                .map_err(|e| CoreError::Persistence(e.to_string()))?
+            {
+                Ok(Some(SessionLoadResponse {
+                    session_id,
+                    domain: row
+                        .get(0)
+                        .map_err(|e| CoreError::Persistence(e.to_string()))?,
+                    prompt: row
+                        .get(1)
+                        .map_err(|e| CoreError::Persistence(e.to_string()))?,
+                    status: row
+                        .get(2)
+                        .map_err(|e| CoreError::Persistence(e.to_string()))?,
+                    context_json: row
+                        .get(3)
+                        .map_err(|e| CoreError::Persistence(e.to_string()))?,
+                    metadata_json: row
+                        .get(4)
+                        .map_err(|e| CoreError::Persistence(e.to_string()))?,
+                    updated_at: row
+                        .get(5)
+                        .map_err(|e| CoreError::Persistence(e.to_string()))?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+        .map_err(|e| CoreError::System(format!("Join error: {e}")))?
+    }
+
+    async fn list_sessions(&self, limit: usize) -> crate::core::Result<Vec<SessionLoadResponse>> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = store
+                .connect()
+                .map_err(|e| CoreError::Persistence(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    r#"
+                SELECT session_id, domain, prompt, status, context_json, metadata_json, updated_at
+                FROM sessions
+                ORDER BY updated_at DESC
+                LIMIT ?1
+                "#,
+                )
+                .map_err(|e| CoreError::Persistence(e.to_string()))?;
+
+            let rows = stmt
+                .query_map(params![limit as i64], |row| {
+                    Ok(SessionLoadResponse {
+                        session_id: row.get(0)?,
+                        domain: row.get(1)?,
+                        prompt: row.get(2)?,
+                        status: row.get(3)?,
+                        context_json: row.get(4)?,
+                        metadata_json: row.get(5)?,
+                        updated_at: row.get(6)?,
+                    })
+                })
+                .map_err(|e| CoreError::Persistence(e.to_string()))?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                result.push(row.map_err(|e| CoreError::Persistence(e.to_string()))?);
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|e| CoreError::System(format!("Join error: {e}")))?
+    }
 }
 
 #[cfg(test)]

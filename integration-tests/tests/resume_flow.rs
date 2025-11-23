@@ -3,12 +3,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 use microfactory::{
+    adapters::templating::HandlebarsRenderer,
     config::MicrofactoryConfig,
     context::Context,
-    llm::LlmClient,
+    core::ports::{LlmClient, LlmOptions},
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
 };
 
@@ -26,60 +27,61 @@ impl ScriptedLlm {
 
 #[async_trait]
 impl LlmClient for ScriptedLlm {
-    async fn sample(&self, prompt: &str, model: Option<&str>) -> Result<String> {
-        let mut single = self.sample_n(prompt, 1, model).await?;
-        Ok(single.pop().unwrap())
-    }
-
-    async fn sample_n(&self, _: &str, n: usize, _: Option<&str>) -> Result<Vec<String>> {
+    async fn chat_completion(
+        &self,
+        _model: &str,
+        _prompt: &str,
+        _options: &LlmOptions,
+    ) -> microfactory::core::Result<String> {
         let mut guard = self.batches.lock().unwrap();
-        let batch = guard
-            .pop_front()
-            .ok_or_else(|| anyhow!("no scripted responses left"))?;
-        if batch.len() == n {
-            Ok(batch)
-        } else if batch.len() == 1 {
-            Ok(vec![batch[0].clone(); n])
-        } else if batch.len() > n {
-            Ok(batch.into_iter().take(n).collect())
-        } else {
-            Err(anyhow!(
-                "expected scripted batch of {n} responses but saw {}",
-                batch.len()
-            ))
+        let current_batch = guard.front_mut().ok_or_else(|| {
+            microfactory::core::error::Error::System("No scripted responses left".into())
+        })?;
+
+        if current_batch.is_empty() {
+            guard.pop_front();
+            if let Some(next) = guard.front_mut() {
+                return Ok(next.remove(0));
+            } else {
+                return Err(microfactory::core::error::Error::System(
+                    "No scripted responses left".into(),
+                ));
+            }
         }
+
+        Ok(current_batch.remove(0))
     }
 }
 
 #[tokio::test]
 async fn runner_pauses_and_resumes_after_low_margin_vote() -> Result<()> {
     let yaml = r#"
-    domains:
-      mini:
-        agents:
-          decomposition:
-            prompt_template: "Decompose:\n{{task}}\n"
-            model: "mock-decompose"
-            samples: 1
-          decomposition_discriminator:
-            prompt_template: "Vote:\n{{task}}\n"
-            model: "mock-decompose-vote"
-            samples: 2
-            k: 1
-          solver:
-            prompt_template: "Solve:\n{{task}}\n"
-            model: "mock-solve"
-            samples: 2
-          solution_discriminator:
-            prompt_template: "Decide:\n{{task}}\n"
-            model: "mock-solution-vote"
-            samples: 2
-            k: 2
-    "#;
+domains:
+  mini:
+    agents:
+      decomposition:
+        prompt_template: "Decompose: {{task}}"
+        model: "mock-decompose"
+        samples: 1
+      decomposition_discriminator:
+        prompt_template: "Vote: {{task}}"
+        model: "mock-decompose-vote"
+        samples: 2
+        k: 1
+      solver:
+        prompt_template: "Solve: {{task}}"
+        model: "mock-solve"
+        samples: 2
+      solution_discriminator:
+        prompt_template: "Decide: {{task}}"
+        model: "mock-solution-vote"
+        samples: 2
+        k: 2
+"#;
 
     let config = Arc::new(MicrofactoryConfig::from_yaml_str(yaml)?);
     let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlm::new(vec![
-        vec!["- Draft patch".into()],                   // decomposition proposal
+        vec!["- Draft patch".into()],                   // decomposition
         vec!["1".into(), "1".into()],                   // decomposition vote
         vec!["Solution A".into(), "Solution B".into()], // solver first pass
         vec!["1".into(), "2".into()],                   // low-margin solution vote (pause)
@@ -99,7 +101,8 @@ async fn runner_pauses_and_resumes_after_low_margin_vote() -> Result<()> {
         step_by_step: false,
     };
 
-    let runner = FlowRunner::new(config, Some(llm), options);
+    let renderer = Arc::new(HandlebarsRenderer::new());
+    let runner = FlowRunner::new(config, Some(llm), renderer, options);
     let mut ctx = Context::new("Patch flaky test", "mini");
 
     let outcome = runner.execute(&mut ctx).await?;

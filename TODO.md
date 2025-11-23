@@ -92,6 +92,17 @@ Each task should include:
     - Restructure modules (or crates) into `core`, `application`, and `adapters`, ensuring the core layer owns workflow state (`Context`, steps) and task coordination logic while adapters host CLI, persistence, LLM, and templating code.
     - Add lightweight contract tests/fakes for the new ports to keep future refactors safe.
 
+### TASK-015: Align CLI/Server/Main with Ring Architecture
+- **Status**: `[ ]`
+- **Priority**: Medium
+- **Dependencies**: TASK-014
+- **Context**: `src/adapters/inbound/mod.rs` still re-exports the legacy `cli` and `server` modules, and `src/main.rs` blends transport, outbound wiring, and domain orchestration. We need true inbound adapters plus a clean composition root so each ring has a single responsibility.
+- **Implementation Details**:
+    - See detailed plan in [docs/plans/TASK-015.md](docs/plans/TASK-015.md).
+    - Define inbound port traits (Rust `trait`s) under `core::ports::inbound` to capture the contract CLI and server adapters implement; keep outbound traits under `core::ports::outbound`.
+    - Split the existing CLI/server code so parsing/transport logic lives in `src/adapters/inbound/{cli,server}.rs`, while `src/cli.rs` / `src/server.rs` become thin façades or disappear entirely.
+    - Ensure inbound adapters depend only on application/core surfaces (runner handles, domain commands) and never on outbound infrastructure; update docs/tests/integration flows accordingly.
+
 ### TASK-007: Parallelize Red-Flagger Evaluation
 - **Status**: `[x]`
 - **Priority**: High

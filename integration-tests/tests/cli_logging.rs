@@ -3,7 +3,7 @@
 use assert_cmd::Command;
 use microfactory::{
     adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
-    context::Context,
+    core::domain::Context,
 };
 use predicates::prelude::*;
 use std::{io::Write, path::Path};

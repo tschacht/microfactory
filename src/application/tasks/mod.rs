@@ -8,10 +8,12 @@ use tracing::{debug, info, warn};
 use tokio::task::JoinSet;
 
 use crate::{
-    context::{
-        AgentConfig, AgentKind, Context, DecompositionProposal, RedFlagIncident, StepStatus,
+    core::{
+        domain::{
+            AgentConfig, AgentKind, Context, DecompositionProposal, RedFlagIncident, StepStatus,
+        },
+        ports::{Clock, FileSystem, LlmClient, LlmOptions, PromptRenderer},
     },
-    core::ports::{Clock, FileSystem, LlmClient, LlmOptions, PromptRenderer},
     red_flaggers::{RedFlagMatch, RedFlagPipeline},
     utils::extract_xml_files,
 };
@@ -998,8 +1000,10 @@ mod tests {
     use super::*;
     use crate::{
         adapters::outbound::{clock::SystemClock, filesystem::StdFileSystem},
-        context::{Context, RedFlaggerDescriptor},
-        core::ports::{Clock, FileSystem},
+        core::{
+            domain::{Context, RedFlaggerDescriptor},
+            ports::{Clock, FileSystem},
+        },
         red_flaggers::RedFlagPipeline,
     };
     use async_trait::async_trait;

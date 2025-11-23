@@ -9,11 +9,11 @@ use crate::{
         SolutionVoteTask, SolveTask, TaskEffect,
     },
     config::MicrofactoryConfig,
-    context::{
-        AgentConfig, AgentKind, Context as WorkflowContext, StepStatus, WaitState, WorkItem,
-    },
     core::{
         config::{AgentDefaults, AgentSettings, DomainRuntimeConfig},
+        domain::{
+            AgentConfig, AgentKind, Context as WorkflowContext, StepStatus, WaitState, WorkItem,
+        },
         ports::{Clock, FileSystem, LlmClient, PromptRenderer, TelemetrySink},
     },
     red_flaggers::RedFlagPipeline,
@@ -625,8 +625,10 @@ mod tests {
             templating::HandlebarsRenderer,
         },
         config::MicrofactoryConfig,
-        context::{Context, StepStatus},
-        core::ports::{Clock, FileSystem, LlmClient, LlmOptions, TelemetrySink},
+        core::{
+            domain::{Context, StepStatus},
+            ports::{Clock, FileSystem, LlmClient, LlmOptions, TelemetrySink},
+        },
     };
 
     use async_trait::async_trait;

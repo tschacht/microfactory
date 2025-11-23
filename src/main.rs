@@ -25,8 +25,10 @@ use microfactory::{
         ServeArgs, StatusArgs, SubprocessArgs,
     },
     config::MicrofactoryConfig,
-    context::{Context, StepMetrics, WorkItem},
-    core::ports::{Clock, FileSystem, LlmClient, TelemetrySink},
+    core::{
+        domain::{Context, StepMetrics, WorkItem},
+        ports::{Clock, FileSystem, LlmClient, TelemetrySink},
+    },
     paths,
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
     server::{self, ServeOptions},

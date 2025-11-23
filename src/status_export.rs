@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     adapters::persistence::{SessionMetadata, SessionRecord, SessionSummary},
-    context::{Context, WaitState, WorkflowMetrics},
+    core::domain::{
+        Context, DecompositionProposal, StepStatus, WaitState, WorkflowMetrics, WorkflowStep,
+    },
 };
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -50,12 +52,12 @@ pub struct SessionDetailExport {
     pub domain: String,
     pub updated_at: i64,
     pub wait_state: Option<WaitState>,
-    pub pending_decompositions: Option<Vec<crate::context::DecompositionProposal>>,
+    pub pending_decompositions: Option<Vec<DecompositionProposal>>,
     pub pending_solutions: Option<Vec<String>>,
     pub metadata: SessionMetadata,
     pub completed_steps: usize,
     pub total_steps: usize,
-    pub steps: Vec<crate::context::WorkflowStep>,
+    pub steps: Vec<WorkflowStep>,
     pub metrics: WorkflowMetrics,
 }
 
@@ -95,12 +97,12 @@ impl SessionDetailExport {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PendingProposals {
     pub step_id: usize,
-    pub proposals: Vec<crate::context::DecompositionProposal>,
+    pub proposals: Vec<DecompositionProposal>,
 }
 
 pub fn count_completed_steps(ctx: &Context) -> usize {
     ctx.steps
         .iter()
-        .filter(|step| matches!(step.status, crate::context::StepStatus::Completed))
+        .filter(|step| matches!(step.status, StepStatus::Completed))
         .count()
 }

@@ -219,7 +219,7 @@ mod tests {
     use super::*;
     use crate::{
         adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus},
-        context::Context,
+        core::domain::Context,
     };
     use axum::body::Body;
     use tempfile::tempdir;

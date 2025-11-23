@@ -2,7 +2,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use microfactory::{
     adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
-    context::Context,
+    core::domain::Context,
     server::{ServeOptions, run_with_listener},
     status_export::{SessionDetailExport, SessionListExport},
 };

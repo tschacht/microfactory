@@ -4,7 +4,6 @@ pub mod adapters;
 pub mod application;
 pub mod cli;
 pub mod config;
-pub mod context;
 pub mod core;
 pub mod paths;
 pub mod red_flaggers;

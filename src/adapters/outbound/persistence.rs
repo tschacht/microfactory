@@ -10,8 +10,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    context::Context,
     core::{
+        domain::Context,
         error::Error as CoreError,
         ports::{SessionLoadResponse, SessionRepository, SessionSaveRequest},
     },

@@ -2,7 +2,7 @@ use anyhow::Result;
 use assert_cmd::Command;
 use microfactory::{
     adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
-    context::Context,
+    core::domain::Context,
     status_export::SessionListExport,
 };
 use tempfile::tempdir;

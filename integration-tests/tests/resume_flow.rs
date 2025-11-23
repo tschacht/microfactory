@@ -13,8 +13,10 @@ use microfactory::{
         templating::HandlebarsRenderer,
     },
     config::MicrofactoryConfig,
-    context::Context,
-    core::ports::{Clock, FileSystem, LlmClient, LlmOptions, TelemetrySink},
+    core::{
+        domain::Context,
+        ports::{Clock, FileSystem, LlmClient, LlmOptions, TelemetrySink},
+    },
     runner::{FlowRunner, RunnerOptions, RunnerOutcome},
 };
 

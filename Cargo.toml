@@ -18,7 +18,7 @@ strsim = "0.11"
 tokio = { version = "1.48", features = ["full"] }
 tracing = "0.1"
 async-trait = "0.1"
-uuid = { version = "1.18", features = ["v4"] }
+uuid = { version = "1.19", features = ["v4"] }
 axum = { version = "0.8", features = ["json", "macros", "tokio"] }
 tokio-stream = "0.1"
 tree-sitter = "0.25.10"
@@ -33,7 +33,7 @@ regex = "1.12.2"
 assert_cmd = "2.1"
 predicates = "3.1"
 tempfile = "3.23"
-uuid = { version = "1.18", features = ["v4"] }
+uuid = { version = "1.19", features = ["v4"] }
 tower = { version = "0.5", features = ["util"] }
 
 [workspace]

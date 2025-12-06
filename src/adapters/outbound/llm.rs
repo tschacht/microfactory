@@ -2,8 +2,11 @@ use std::{cmp::max, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use rig::client::{ProviderValue, builder::DynClientBuilder};
-use rig::completion::Prompt;
+use rig::{
+    client::CompletionClient,
+    completion::Prompt,
+    providers::{anthropic, gemini, openai, xai},
+};
 use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::cli::LlmProvider;
@@ -87,19 +90,8 @@ impl LlmClient for RigLlmClient {
             .context("Semaphore closed while waiting for LLM slot")?;
 
         let model = model_override.unwrap_or(&self.inner.default_model);
-        let agent = {
-            let builder = DynClientBuilder::new();
-            let agent_builder = builder
-                .agent_with_api_key_val(
-                    self.inner.provider.provider_id(),
-                    model,
-                    ProviderValue::Simple(self.inner.api_key.clone()),
-                )
-                .map_err(|err| anyhow!("Failed to create agent: {err}"))?;
-            agent_builder.build()
-        };
-        let response = agent
-            .prompt(prompt)
+        let response = self
+            .prompt_once(model, prompt, None)
             .await
             .map_err(|err| anyhow!("LLM prompt failed: {err}"));
 
@@ -147,37 +139,80 @@ impl CoreLlmClient for RigLlmClient {
             .await
             .map_err(|e| CoreError::System(format!("Semaphore error: {e}")))?;
 
-        let agent = {
-            let builder = DynClientBuilder::new();
-            let mut agent_builder = builder
-                .agent_with_api_key_val(
-                    self.inner.provider.provider_id(),
-                    model,
-                    ProviderValue::Simple(self.inner.api_key.clone()),
-                )
-                .map_err(|err| CoreError::LlmProvider {
-                    provider: self.inner.provider.as_str().to_string(),
-                    details: format!("Failed to create agent: {err}"),
-                    retryable: false,
-                })?;
-
-            if let Some(temp) = options.temperature {
-                agent_builder = agent_builder.temperature(f64::from(temp));
-            }
-
-            agent_builder.build()
-        };
-
-        let response = agent
-            .prompt(prompt)
+        self.prompt_once(model, prompt, options.temperature.map(f64::from))
             .await
             .map_err(|err| CoreError::LlmProvider {
                 provider: self.inner.provider.as_str().to_string(),
                 details: err.to_string(),
                 retryable: true,
-            })?;
+            })
+    }
+}
 
-        Ok(response)
+impl RigLlmClient {
+    async fn prompt_once(
+        &self,
+        model: &str,
+        prompt: &str,
+        temperature: Option<f64>,
+    ) -> Result<String> {
+        match self.inner.provider {
+            LlmProvider::Openai => {
+                let client: openai::Client<reqwest::Client> =
+                    openai::Client::new(&self.inner.api_key)
+                        .map_err(|err| anyhow!("Failed to create OpenAI client: {err}"))?;
+                let mut agent_builder = client.agent(model);
+                if let Some(temp) = temperature {
+                    agent_builder = agent_builder.temperature(temp);
+                }
+                agent_builder
+                    .build()
+                    .prompt(prompt)
+                    .await
+                    .map_err(|err| anyhow!("OpenAI prompt error: {err}"))
+            }
+            LlmProvider::Anthropic => {
+                let client: anthropic::Client<reqwest::Client> =
+                    anthropic::Client::new(&self.inner.api_key)
+                        .map_err(|err| anyhow!("Failed to create Anthropic client: {err}"))?;
+                let mut agent_builder = client.agent(model);
+                if let Some(temp) = temperature {
+                    agent_builder = agent_builder.temperature(temp);
+                }
+                agent_builder
+                    .build()
+                    .prompt(prompt)
+                    .await
+                    .map_err(|err| anyhow!("Anthropic prompt error: {err}"))
+            }
+            LlmProvider::Gemini => {
+                let client: gemini::Client<reqwest::Client> =
+                    gemini::Client::new(&self.inner.api_key)
+                        .map_err(|err| anyhow!("Failed to create Gemini client: {err}"))?;
+                let mut agent_builder = client.agent(model);
+                if let Some(temp) = temperature {
+                    agent_builder = agent_builder.temperature(temp);
+                }
+                agent_builder
+                    .build()
+                    .prompt(prompt)
+                    .await
+                    .map_err(|err| anyhow!("Gemini prompt error: {err}"))
+            }
+            LlmProvider::Grok => {
+                let client: xai::Client<reqwest::Client> = xai::Client::new(&self.inner.api_key)
+                    .map_err(|err| anyhow!("Failed to create xAI client: {err}"))?;
+                let mut agent_builder = client.agent(model);
+                if let Some(temp) = temperature {
+                    agent_builder = agent_builder.temperature(temp);
+                }
+                agent_builder
+                    .build()
+                    .prompt(prompt)
+                    .await
+                    .map_err(|err| anyhow!("xAI prompt error: {err}"))
+            }
+        }
     }
 }
 

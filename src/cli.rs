@@ -336,10 +336,10 @@ pub enum LlmProvider {
 impl LlmProvider {
     pub fn provider_id(self) -> &'static str {
         match self {
-            LlmProvider::Openai => rig::client::builder::DefaultProviders::OPENAI,
-            LlmProvider::Anthropic => rig::client::builder::DefaultProviders::ANTHROPIC,
-            LlmProvider::Gemini => rig::client::builder::DefaultProviders::GEMINI,
-            LlmProvider::Grok => rig::client::builder::DefaultProviders::XAI,
+            LlmProvider::Openai => rig::client::builder::DefaultProviders::OpenAI.into(),
+            LlmProvider::Anthropic => rig::client::builder::DefaultProviders::Anthropic.into(),
+            LlmProvider::Gemini => rig::client::builder::DefaultProviders::Gemini.into(),
+            LlmProvider::Grok => rig::client::builder::DefaultProviders::XAI.into(),
         }
     }
 

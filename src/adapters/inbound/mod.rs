@@ -1,10 +1,8 @@
-//! Inbound adapters translate external stimuli (CLI/HTTP) into application commands.
-//! For now we re-export the legacy modules while they are migrated.
+//! Inbound adapters translate external stimuli (CLI/HTTP) into application service calls.
+//! These are driving adapters that consume the `WorkflowService` trait.
 
-pub mod cli {
-    pub use crate::cli::*;
-}
+pub mod cli;
+pub mod server;
 
-pub mod server {
-    pub use crate::server::*;
-}
+pub use cli::{Cli, CliAdapter, Commands, InspectMode, LlmProvider, RunArgs, ServeArgs};
+pub use server::{ServeOptions, ServerAdapter};

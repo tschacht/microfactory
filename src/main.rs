@@ -1,3 +1,12 @@
+//! Microfactory CLI entry point and composition root.
+//!
+//! This file wires together the application by:
+//! 1. Parsing CLI arguments
+//! 2. Initializing tracing/logging
+//! 3. Constructing outbound adapters (LLM client, persistence, etc.)
+//! 4. Constructing the application service
+//! 5. Passing the service to inbound adapters (CLI, HTTP server)
+
 use std::{
     fs,
     net::SocketAddr,
@@ -6,34 +15,22 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as AnyhowContext, Result, anyhow};
+use anyhow::{Result, anyhow};
 use clap::Parser;
-use serde::Serialize;
-use uuid::Uuid;
 
 use microfactory::{
     adapters::{
+        inbound::{Cli, CliAdapter, Commands, LlmProvider, ServeArgs, ServeOptions, ServerAdapter},
         llm::RigLlmClient,
         outbound::{
-            clock::SystemClock, filesystem::StdFileSystem, telemetry::TracingTelemetrySink,
+            clock::SystemClock, filesystem::StdFileSystem, persistence::SessionStore,
+            telemetry::TracingTelemetrySink,
         },
-        persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
         templating::HandlebarsRenderer,
     },
-    cli::{
-        Cli, Commands, HelpArgs, HelpFormat, HelpTopic, LlmProvider, ResumeArgs, RunArgs,
-        ServeArgs, StatusArgs, SubprocessArgs,
-    },
-    config::MicrofactoryConfig,
-    core::{
-        domain::{Context, StepMetrics, WorkItem},
-        ports::{Clock, FileSystem, LlmClient, TelemetrySink},
-    },
-    paths,
-    runner::{FlowRunner, RunnerOptions, RunnerOutcome},
-    server::{self, ServeOptions},
-    status_export::{SessionDetailExport, SessionListExport, count_completed_steps},
-    tracing_setup,
+    application::service::{ApiKeyResolver, AppService, LlmClientFactory},
+    core::ports::{Clock, FileSystem, LlmClient, TelemetrySink, WorkflowService},
+    paths, tracing_setup,
 };
 
 static HOME_ENV_ONCE: OnceLock<()> = OnceLock::new();
@@ -42,6 +39,7 @@ static HOME_ENV_ONCE: OnceLock<()> = OnceLock::new();
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Validate mutually exclusive flags
     if cli.inspect.is_some() && (cli.log_json || cli.pretty || cli.compact) {
         use clap::CommandFactory;
         Cli::command()
@@ -52,6 +50,7 @@ async fn main() -> Result<()> {
             .exit();
     }
 
+    // Determine JSON log format
     let mut json_format = if cli.compact {
         tracing_setup::JsonLogFormat::Compact
     } else {
@@ -62,14 +61,7 @@ async fn main() -> Result<()> {
     }
 
     // Pre-calculate session ID for logging context
-    let log_session_id = match &cli.command {
-        Commands::Run(_) => Some(new_session_id()),
-        Commands::Resume(args) => Some(args.session_id.clone()),
-        Commands::Subprocess(_) => Some(format!("subprocess-{}", new_session_id())),
-        Commands::Status(args) => args.session_id.clone(),
-        // Help and Serve don't get session-specific log files by default
-        _ => None,
-    };
+    let log_session_id = compute_log_session_id(&cli.command);
 
     // Initialize tracing (holds file handle)
     let _guard = tracing_setup::init(
@@ -80,13 +72,16 @@ async fn main() -> Result<()> {
         log_session_id.as_deref(),
     );
 
+    // Build the application service with all dependencies
+    let service = build_app_service()?;
+
+    // Dispatch command to appropriate adapter
     let result = match cli.command {
-        Commands::Run(args) => run_command(args, log_session_id.unwrap()).await,
-        Commands::Status(args) => status_command(args).await,
-        Commands::Resume(args) => resume_command(args).await,
-        Commands::Subprocess(args) => subprocess_command(args, log_session_id.unwrap()).await,
-        Commands::Serve(args) => serve_command(args).await,
-        Commands::Help(args) => help_command(args).await,
+        Commands::Serve(args) => serve_command(args, service).await,
+        command => {
+            let adapter = CliAdapter::new(service);
+            adapter.execute(command).await
+        }
     };
 
     if let Err(ref e) = result {
@@ -96,363 +91,69 @@ async fn main() -> Result<()> {
     result
 }
 
-async fn run_command(args: RunArgs, session_id: String) -> Result<()> {
-    let config = Arc::new(load_config(&args.config)?);
-    ensure_domain_exists(&config, &args.domain)?;
-
-    let llm_client: Arc<dyn LlmClient> = Arc::new(create_llm_client(
-        args.llm_provider,
-        args.llm_model.clone(),
-        args.max_concurrent_llm,
-        resolve_api_key(args.api_key.clone(), args.llm_provider)?,
-    )?);
-    let runner_options = RunnerOptions::from_cli(
-        args.samples,
-        args.k,
-        args.adaptive_k,
-        args.step_by_step,
-        args.human_low_margin_threshold,
-    );
-    let mut context = Context::new(&args.prompt, &args.domain);
-    context.session_id = session_id;
-    context.dry_run = args.dry_run;
-    context.output_dir = args.output_dir.clone();
-
-    if args.dry_run {
-        run_dry_run_probe(&args, llm_client.clone()).await?;
-        return Ok(());
-    }
-
-    tracing::info!(
-        "Starting session {} (domain: {})",
-        context.session_id,
-        context.domain
-    );
-
-    let metadata = SessionMetadata {
-        config_path: args.config.to_string_lossy().to_string(),
-        llm_provider: args.llm_provider.as_str().to_string(),
-        llm_model: args.llm_model.clone(),
-        max_concurrent_llm: args.max_concurrent_llm,
-        samples: args.samples,
-        k: args.k,
-        adaptive_k: args.adaptive_k,
-        human_low_margin_threshold: args.human_low_margin_threshold,
-    };
+/// Build the application service with all injected dependencies.
+fn build_app_service() -> Result<Arc<dyn WorkflowService>> {
     let store = SessionStore::open(None)?;
-    let mut envelope = SessionEnvelope {
-        context: context.clone(),
-        metadata: metadata.clone(),
-    };
-    store.save(&envelope, SessionStatus::Running)?;
-
     let renderer = Arc::new(HandlebarsRenderer::new());
     let (file_system, clock, telemetry) = default_runner_deps();
-    let runner = FlowRunner::new(
-        config,
-        Some(llm_client),
+
+    let llm_factory: LlmClientFactory = Arc::new(
+        |provider: &str, model: &str, max_concurrent: usize, api_key: String| {
+            let llm_provider = LlmProvider::from_name(provider)
+                .ok_or_else(|| anyhow!("Unknown LLM provider: {}", provider))?;
+            let client =
+                RigLlmClient::new(llm_provider, api_key, model.to_string(), max_concurrent)?;
+            Ok(Arc::new(client) as Arc<dyn LlmClient>)
+        },
+    );
+
+    let api_key_resolver: ApiKeyResolver = Arc::new(|cli_value: Option<String>, provider: &str| {
+        let llm_provider = LlmProvider::from_name(provider)
+            .ok_or_else(|| anyhow!("Unknown LLM provider: {}", provider))?;
+        resolve_api_key(cli_value, llm_provider)
+    });
+
+    let service = AppService::new(
+        store,
         renderer,
-        runner_options,
         file_system,
         clock,
         telemetry,
+        llm_factory,
+        api_key_resolver,
     );
-    match runner.execute(&mut context).await {
-        Ok(outcome) => {
-            envelope.context = context.clone();
-            let status = match &outcome {
-                RunnerOutcome::Completed => SessionStatus::Completed,
-                RunnerOutcome::Paused(wait) => {
-                    tracing::info!(
-                        "Session {} paused at step {} ({}) - {}",
-                        context.session_id,
-                        wait.step_id,
-                        wait.trigger,
-                        wait.details
-                    );
-                    SessionStatus::Paused
-                }
-            };
-            store.save(&envelope, status)?;
-            match outcome {
-                RunnerOutcome::Completed => {
-                    tracing::info!("Session {} completed successfully.", context.session_id);
-                }
-                RunnerOutcome::Paused(_) => {
-                    tracing::info!(
-                        "Use `microfactory resume --session-id {}` after resolving the issue.",
-                        context.session_id
-                    );
-                }
-            }
-        }
-        Err(err) => {
-            envelope.context = context.clone();
-            store.save(&envelope, SessionStatus::Failed)?;
-            return Err(err);
-        }
-    }
 
-    Ok(())
+    Ok(Arc::new(service))
 }
 
-async fn status_command(args: StatusArgs) -> Result<()> {
-    let store = SessionStore::open(None)?;
-    if let Some(id) = args.session_id {
-        let record = store.load(&id)?;
-        if args.json {
-            let summary = SessionDetailExport::from_record(&record);
-            println!("{}", serde_json::to_string_pretty(&summary)?);
-        } else {
-            println!("Session: {id}");
-            println!("Status: {}", record.status.as_str());
-            println!("Prompt: {}", record.envelope.context.prompt);
-            println!("Domain: {}", record.envelope.context.domain);
-            println!("Updated: {}", record.updated_at);
-            if let Some(wait) = &record.envelope.context.wait_state {
-                println!(
-                    "Waiting on step {} ({}) - {}",
-                    wait.step_id, wait.trigger, wait.details
-                );
-            }
-            println!(
-                "Steps completed: {}",
-                count_completed_steps(&record.envelope.context)
-            );
-        }
-    } else {
-        let limit = args.limit.max(1);
-        let summaries = store.list(limit)?;
-        if args.json {
-            let payload = SessionListExport::from_summaries(summaries);
-            println!("{}", serde_json::to_string_pretty(&payload)?);
-        } else if summaries.is_empty() {
-            println!("No sessions recorded yet.");
-        } else {
-            println!("Recent sessions:");
-            for summary in summaries {
-                println!(
-                    "- {} [{}] domain={} updated={} prompt={}",
-                    summary.session_id,
-                    summary.status.as_str(),
-                    summary.domain,
-                    summary.updated_at,
-                    summary.prompt
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn resume_command(args: ResumeArgs) -> Result<()> {
-    let store = SessionStore::open(None)?;
-    let record = store.load(&args.session_id)?;
-    let mut context = record.envelope.context;
-    let prev_metadata = record.envelope.metadata;
-
-    let provider = args
-        .llm_provider
-        .or_else(|| LlmProvider::from_name(prev_metadata.llm_provider.as_str()))
-        .ok_or_else(|| {
-            anyhow!(
-                "Session stored unsupported provider '{}'",
-                prev_metadata.llm_provider
-            )
-        })?;
-    let model = args
-        .llm_model
-        .unwrap_or_else(|| prev_metadata.llm_model.clone());
-    let max_concurrent = args
-        .max_concurrent_llm
-        .unwrap_or(prev_metadata.max_concurrent_llm);
-    let samples = args.samples.unwrap_or(prev_metadata.samples);
-    let k = args.k.unwrap_or(prev_metadata.k);
-    let adaptive = prev_metadata.adaptive_k;
-    let human_low_margin_threshold = args
-        .human_low_margin_threshold
-        .unwrap_or(prev_metadata.human_low_margin_threshold);
-
-    let config_path = args
-        .config
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(prev_metadata.config_path.clone()));
-    let config = Arc::new(load_config(&config_path)?);
-    ensure_domain_exists(&config, &context.domain)?;
-
-    if let Some(wait) = &context.wait_state {
-        tracing::info!(
-            "Resuming session {} previously paused at step {} ({}) - {}",
-            context.session_id,
-            wait.step_id,
-            wait.trigger,
-            wait.details
-        );
-    }
-    context.clear_wait_state();
-
-    let api_key = resolve_api_key(args.api_key.clone(), provider)?;
-    let llm_client: Arc<dyn LlmClient> = Arc::new(create_llm_client(
-        provider,
-        model.clone(),
-        max_concurrent,
-        api_key,
-    )?);
-    let runner_options =
-        RunnerOptions::from_cli(samples, k, adaptive, false, human_low_margin_threshold);
-
-    let metadata = SessionMetadata {
-        config_path: config_path.to_string_lossy().to_string(),
-        llm_provider: provider.as_str().to_string(),
-        llm_model: model.clone(),
-        max_concurrent_llm: max_concurrent,
-        samples,
-        k,
-        adaptive_k: adaptive,
-        human_low_margin_threshold,
-    };
-    let mut envelope = SessionEnvelope {
-        context: context.clone(),
-        metadata: metadata.clone(),
-    };
-    store.save(&envelope, SessionStatus::Running)?;
-
-    let renderer = Arc::new(HandlebarsRenderer::new());
-    let (file_system, clock, telemetry) = default_runner_deps();
-    let runner = FlowRunner::new(
-        config,
-        Some(llm_client),
-        renderer,
-        runner_options,
-        file_system,
-        clock,
-        telemetry,
-    );
-    match runner.execute(&mut context).await {
-        Ok(outcome) => {
-            envelope.context = context.clone();
-            let status = match &outcome {
-                RunnerOutcome::Completed => SessionStatus::Completed,
-                RunnerOutcome::Paused(wait) => {
-                    tracing::info!(
-                        "Session {} paused again at step {} ({}) - {}",
-                        context.session_id,
-                        wait.step_id,
-                        wait.trigger,
-                        wait.details
-                    );
-                    SessionStatus::Paused
-                }
-            };
-            store.save(&envelope, status)?;
-            match outcome {
-                RunnerOutcome::Completed => {
-                    tracing::info!("Session {} completed.", context.session_id);
-                }
-                RunnerOutcome::Paused(_) => {
-                    tracing::info!(
-                        "Use `microfactory resume --session-id {}` once resolved.",
-                        context.session_id
-                    );
-                }
-            }
-        }
-        Err(err) => {
-            envelope.context = context.clone();
-            store.save(&envelope, SessionStatus::Failed)?;
-            return Err(err);
-        }
-    }
-
-    Ok(())
-}
-
-async fn subprocess_command(args: SubprocessArgs, session_id: String) -> Result<()> {
-    let config = Arc::new(load_config(&args.config)?);
-    ensure_domain_exists(&config, &args.domain)?;
-    let api_key = resolve_api_key(args.api_key.clone(), args.llm_provider)?;
-    let llm_client: Arc<dyn LlmClient> = Arc::new(create_llm_client(
-        args.llm_provider,
-        args.llm_model.clone(),
-        args.max_concurrent_llm,
-        api_key,
-    )?);
-
-    let mut context = Context::new(&args.step, &args.domain);
-    context.session_id = session_id;
-    if let Some(extra) = &args.context_json {
-        context
-            .domain_data
-            .insert("context_json".into(), extra.clone());
-    }
-    let root_id = context.ensure_root();
-    context.work_queue.clear();
-    context.enqueue_work(WorkItem::Solve { step_id: root_id });
-    context.enqueue_work(WorkItem::SolutionVote { step_id: root_id });
-
-    let runner_options = RunnerOptions::from_cli(args.samples, args.k, false, false, 1);
-    let renderer = Arc::new(HandlebarsRenderer::new());
-    let (file_system, clock, telemetry) = default_runner_deps();
-    let runner = FlowRunner::new(
-        config,
-        Some(llm_client),
-        renderer,
-        runner_options,
-        file_system,
-        clock,
-        telemetry,
-    );
-    match runner.execute(&mut context).await? {
-        RunnerOutcome::Completed => {
-            let step = context
-                .step(root_id)
-                .with_context(|| "Root step missing after subprocess run")?;
-            let metrics = context.metrics().step_metrics(root_id).cloned();
-            let output = SubprocessOutput {
-                session_id: context.session_id.clone(),
-                step_id: root_id,
-                candidate_solutions: step.candidate_solutions.clone(),
-                winning_solution: step.winning_solution.clone(),
-                metrics,
-            };
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        }
-        RunnerOutcome::Paused(wait) => {
-            return Err(anyhow!(
-                "Subprocess paused at step {} ({}) - {}",
-                wait.step_id,
-                wait.trigger,
-                wait.details
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-async fn serve_command(args: ServeArgs) -> Result<()> {
+/// Handle the serve command separately since it needs special setup.
+async fn serve_command(args: ServeArgs, service: Arc<dyn WorkflowService>) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", args.bind, args.port)
         .parse()
-        .context("Invalid bind/port combination for serve command")?;
-    let store = SessionStore::open(None)?;
+        .map_err(|_| anyhow!("Invalid bind/port combination for serve command"))?;
+
     let options = ServeOptions {
         default_limit: args.limit.max(1),
         poll_interval: Duration::from_millis(args.poll_interval_ms.max(250)),
     };
+
     tracing::info!("Serving session API on http://{addr}");
-    server::run(addr, store, options).await
+    let adapter = ServerAdapter::new(service, options);
+    adapter.run(addr).await
 }
 
-async fn help_command(args: HelpArgs) -> Result<()> {
-    let topic = args.topic.unwrap_or(HelpTopic::Overview);
-    let section = build_help_section(topic);
-    match args.format {
-        HelpFormat::Text => render_help_text(&section),
-        HelpFormat::Json => println!("{}", serde_json::to_string_pretty(&section)?),
+/// Compute the session ID for log file naming.
+fn compute_log_session_id(command: &Commands) -> Option<String> {
+    match command {
+        Commands::Run(_) => Some(uuid::Uuid::new_v4().to_string()),
+        Commands::Resume(args) => Some(args.session_id.clone()),
+        Commands::Subprocess(_) => Some(format!("subprocess-{}", uuid::Uuid::new_v4())),
+        Commands::Status(args) => args.session_id.clone(),
+        Commands::Serve(_) | Commands::Help(_) => None,
     }
-    Ok(())
 }
 
+/// Create default runtime dependencies for the runner.
 fn default_runner_deps() -> (Arc<dyn FileSystem>, Arc<dyn Clock>, Arc<dyn TelemetrySink>) {
     let file_system: Arc<dyn FileSystem> = Arc::new(StdFileSystem::new());
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
@@ -460,371 +161,7 @@ fn default_runner_deps() -> (Arc<dyn FileSystem>, Arc<dyn Clock>, Arc<dyn Teleme
     (file_system, clock, telemetry)
 }
 
-fn render_help_text(section: &HelpSection) {
-    println!("Topic: {}", section.topic);
-    println!("Summary: {}", section.summary);
-    if !section.usage_examples.is_empty() {
-        println!();
-        println!("Usage examples:");
-        for example in &section.usage_examples {
-            println!("  {example}");
-        }
-    }
-    if !section.key_flags.is_empty() {
-        println!();
-        println!("Key flags:");
-        for flag in &section.key_flags {
-            println!("  {:<24}{}", flag.flag, flag.description);
-        }
-    }
-    if !section.notes.is_empty() {
-        println!();
-        println!("Notes:");
-        for note in &section.notes {
-            println!("  - {note}");
-        }
-    }
-    println!();
-    println!("Tip: every subcommand also supports the standard `--help` output.");
-}
-
-fn build_help_section(topic: HelpTopic) -> HelpSection {
-    match topic {
-        HelpTopic::Overview => HelpSection {
-            topic: "overview",
-            summary: "Microfactory runs MAKER-inspired workflows (decompose → solve → verify) with persistence, resume, and HTTP monitoring endpoints.",
-            usage_examples: vec![
-                r#"microfactory run --prompt "refactor api" --domain code"#,
-                "microfactory status --json --limit 5",
-                "microfactory serve --bind 0.0.0.0 --port 8080",
-            ],
-            key_flags: vec![
-                FlagHelp {
-                    flag: "run",
-                    description: "Start a new workflow session backed by the domain config.",
-                },
-                FlagHelp {
-                    flag: "status",
-                    description: "Query stored sessions (human output by default, JSON via --json).",
-                },
-                FlagHelp {
-                    flag: "resume",
-                    description: "Continue a paused session after addressing the wait reason.",
-                },
-                FlagHelp {
-                    flag: "subprocess",
-                    description: "Execute a single MAKER step in isolation and emit JSON.",
-                },
-                FlagHelp {
-                    flag: "serve",
-                    description: "Expose sessions over HTTP (REST + SSE) for higher-level tooling.",
-                },
-                FlagHelp {
-                    flag: "--inspect <mode>",
-                    description: "Stream detailed LLM ops/messages (ops, payloads, messages, files) to stdout.",
-                },
-            ],
-            notes: vec![
-                "Use `microfactory help --topic <command>` for focused instructions or `--format json` for machine parsing.",
-                "API keys load from ~/.env first, then fall back to real env vars.",
-                "Session data lives under ~/.microfactory (override via MICROFACTORY_HOME).",
-            ],
-        },
-        HelpTopic::Run => HelpSection {
-            topic: "run",
-            summary: "Execute the full MAKER workflow for a given prompt within a configured domain.",
-            usage_examples: vec![
-                r#"microfactory run --prompt "stabilize auth" --domain code --config config.yaml"#,
-                r#"microfactory run --prompt "audit notebooks" --domain analysis --dry-run --samples 6 --k 4"#,
-                r#"microfactory run --prompt "fix bug" --inspect messages"#,
-            ],
-            key_flags: vec![
-                FlagHelp {
-                    flag: "--prompt <text>",
-                    description: "Required task description fed into the decomposition agent.",
-                },
-                FlagHelp {
-                    flag: "--domain <name>",
-                    description: "Selects which domain section of the YAML config to load (e.g. code).",
-                },
-                FlagHelp {
-                    flag: "--config <path>",
-                    description: "Defaults to ./config.yaml; point to custom configs per domain.",
-                },
-                FlagHelp {
-                    flag: "--api-key <key>",
-                    description: "Override provider API key; otherwise resolves from env/~/\\.env.",
-                },
-                FlagHelp {
-                    flag: "--llm-provider <id>",
-                    description: "openai | anthropic | gemini | grok; determines API key lookup.",
-                },
-                FlagHelp {
-                    flag: "--llm-model <name>",
-                    description: "Model identifier passed directly to the provider (e.g. gpt-4.1).",
-                },
-                FlagHelp {
-                    flag: "--samples <n>",
-                    description: "Samples per microagent step (default 10).",
-                },
-                FlagHelp {
-                    flag: "--k <n>",
-                    description: "First-to-ahead-by-k voting margin (default 3).",
-                },
-                FlagHelp {
-                    flag: "--adaptive-k",
-                    description: "Enable adaptive voting margins driven by live metrics.",
-                },
-                FlagHelp {
-                    flag: "--max-concurrent-llm <n>",
-                    description: "Cap simultaneous LLM calls (default 4) for rate limits.",
-                },
-                FlagHelp {
-                    flag: "--repo-path <path>",
-                    description: "Run steps relative to a specific repository or workspace.",
-                },
-                FlagHelp {
-                    flag: "--dry-run",
-                    description: "Skips persistence and issues a single LLM probe for validation.",
-                },
-                FlagHelp {
-                    flag: "--step-by-step",
-                    description: "Pause after decomposition and step completion for manual review.",
-                },
-                FlagHelp {
-                    flag: "--human-low-margin-threshold <n>",
-                    description: "Human pause trigger for thin vote margins (set 0 to keep running despite ties).",
-                },
-                FlagHelp {
-                    flag: "-o, --output-dir <path>",
-                    description: "Directory for output files (default: current working directory).",
-                },
-                FlagHelp {
-                    flag: "-v, --verbose",
-                    description: "Global logging toggle for timestamps + debug-level stdout.",
-                },
-                FlagHelp {
-                    flag: "--log-json [--pretty|--compact]",
-                    description: "Emit structured logs instead of human text (indent vs single-line).",
-                },
-                FlagHelp {
-                    flag: "--inspect <mode>",
-                    description: "Bypass default logs to show internal LLM events (ops, payloads, messages, files).",
-                },
-            ],
-            notes: vec![
-                "Successful runs persist context + metadata; inspect progress via `status` or the HTTP service.",
-                "Set MICROFACTORY_HOME to isolate state per project or CI worker.",
-            ],
-        },
-        HelpTopic::Status => HelpSection {
-            topic: "status",
-            summary: "Inspect stored sessions (human-readable or JSON).",
-            usage_examples: vec![
-                "microfactory status --limit 5",
-                "microfactory status --session-id a1b2 --json",
-            ],
-            key_flags: vec![
-                FlagHelp {
-                    flag: "--session-id <id>",
-                    description: "Show detailed information for a single session.",
-                },
-                FlagHelp {
-                    flag: "--limit <n>",
-                    description: "Restrict the number of listed sessions (default 10).",
-                },
-                FlagHelp {
-                    flag: "--json",
-                    description: "Emit structured summaries matching the HTTP API schema.",
-                },
-                FlagHelp {
-                    flag: "-v, --verbose",
-                    description: "Include timestamps/debug output in the human-readable listing.",
-                },
-                FlagHelp {
-                    flag: "--log-json [--pretty|--compact]",
-                    description: "Use JSON logging for status output (indented or single-line).",
-                },
-            ],
-            notes: vec![
-                "Use JSON output for LLM or dashboard ingestion without scraping stdout.",
-                "Combine with `jq`/`gron` to filter for paused or failed sessions quickly.",
-            ],
-        },
-        HelpTopic::Resume => HelpSection {
-            topic: "resume",
-            summary: "Continue a paused/failed session using stored metadata (override options available).",
-            usage_examples: vec![
-                "microfactory resume --session-id a1b2",
-                "microfactory resume --session-id a1b2 --llm-provider anthropic --llm-model claude-3.5",
-            ],
-            key_flags: vec![
-                FlagHelp {
-                    flag: "--session-id <id>",
-                    description: "Target session UUID (required).",
-                },
-                FlagHelp {
-                    flag: "--config <path>",
-                    description: "Override the saved config path if files moved.",
-                },
-                FlagHelp {
-                    flag: "--api-key <key>",
-                    description: "Swap credentials when resuming (falls back to stored/env otherwise).",
-                },
-                FlagHelp {
-                    flag: "--llm-provider|--llm-model",
-                    description: "Swap providers/models without editing persisted metadata.",
-                },
-                FlagHelp {
-                    flag: "--samples|--k|--max-concurrent-llm",
-                    description: "Tweak runtime parameters prior to resuming.",
-                },
-                FlagHelp {
-                    flag: "--human-low-margin-threshold <n>",
-                    description: "Override the low-margin pause guard (0 disables).",
-                },
-                FlagHelp {
-                    flag: "-v, --verbose / --log-json",
-                    description: "Global logging controls apply just like on `run`.",
-                },
-                FlagHelp {
-                    flag: "--inspect <mode>",
-                    description: "Stream decoded LLM interactions during the resumed session.",
-                },
-            ],
-            notes: vec![
-                "Wait-state triggers are cleared automatically so execution can continue.",
-                "Failures update their status immediately; inspect via `status --session-id <id>`.",
-            ],
-        },
-        HelpTopic::Subprocess => HelpSection {
-            topic: "subprocess",
-            summary: "Run a single microtask (e.g., solver) with JSON I/O for tooling hooks.",
-            usage_examples: vec![
-                r#"microfactory subprocess --domain code --step solver --context-json '{"files":["lib.rs"]}' --samples 4"#,
-            ],
-            key_flags: vec![
-                FlagHelp {
-                    flag: "--domain <name>",
-                    description: "Required domain key matching your config file.",
-                },
-                FlagHelp {
-                    flag: "--config <path>",
-                    description: "Config to load agent definitions from (defaults to ./config.yaml).",
-                },
-                FlagHelp {
-                    flag: "--step <name>",
-                    description: "Select the microtask (solver, verifier, etc.).",
-                },
-                FlagHelp {
-                    flag: "--context-json <blob>",
-                    description: "Inline JSON merged into the domain-specific context.",
-                },
-                FlagHelp {
-                    flag: "--samples / --k",
-                    description: "Sampling + vote settings for this isolated run.",
-                },
-                FlagHelp {
-                    flag: "--llm-provider / --llm-model",
-                    description: "Choose the backend + model for the subprocess call.",
-                },
-                FlagHelp {
-                    flag: "--api-key <key>",
-                    description: "Provide credentials explicitly if env resolution is insufficient.",
-                },
-                FlagHelp {
-                    flag: "--max-concurrent-llm <n>",
-                    description: "Limit simultaneous LLM calls (default 2).",
-                },
-                FlagHelp {
-                    flag: "-v, --verbose",
-                    description: "Show human-friendly logs during the subprocess run.",
-                },
-                FlagHelp {
-                    flag: "--log-json [--pretty|--compact]",
-                    description: "Emit the subprocess logs as JSON instead of text.",
-                },
-                FlagHelp {
-                    flag: "--inspect <mode>",
-                    description: "See the exact prompt/response for this isolated step.",
-                },
-            ],
-            notes: vec![
-                "Outputs SubprocessOutput JSON: session, step, candidates, winner, metrics.",
-                "Great for editor commands or CI bots needing a single reasoning step.",
-            ],
-        },
-        HelpTopic::Serve => HelpSection {
-            topic: "serve",
-            summary: "Expose sessions via REST + SSE so dashboards or agents can monitor progress.",
-            usage_examples: vec!["microfactory serve --bind 0.0.0.0 --port 8080"],
-            key_flags: vec![
-                FlagHelp {
-                    flag: "--bind <ip>",
-                    description: "Interface for the Axum HTTP server (default 127.0.0.1).",
-                },
-                FlagHelp {
-                    flag: "--port <n>",
-                    description: "Port number (default 8080).",
-                },
-                FlagHelp {
-                    flag: "--limit <n>",
-                    description: "Default page size for GET /sessions when clients omit limit.",
-                },
-                FlagHelp {
-                    flag: "--poll-interval-ms <n>",
-                    description: "SSE polling cadence for /sessions/stream (min 250ms).",
-                },
-                FlagHelp {
-                    flag: "-v, --verbose",
-                    description: "Emit INFO/DEBUG logs for HTTP access + background tasks.",
-                },
-                FlagHelp {
-                    flag: "--log-json [--pretty|--compact]",
-                    description: "Switch server logs to structured JSON output.",
-                },
-                FlagHelp {
-                    flag: "--inspect <mode>",
-                    description: "Trace background LLM calls if the server performs any (rare).",
-                },
-            ],
-            notes: vec![
-                "Endpoints: GET /sessions, GET /sessions/{id}, GET /sessions/stream (SSE).",
-                "Combine with `curl` or dashboards to watch sessions without invoking the CLI.",
-                "Serve shares the same serialization structs as status --json for parity.",
-            ],
-        },
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct HelpSection {
-    topic: &'static str,
-    summary: &'static str,
-    usage_examples: Vec<&'static str>,
-    key_flags: Vec<FlagHelp>,
-    notes: Vec<&'static str>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct FlagHelp {
-    flag: &'static str,
-    description: &'static str,
-}
-
-fn load_config(path: &PathBuf) -> Result<MicrofactoryConfig> {
-    MicrofactoryConfig::from_path(path)
-}
-
-fn create_llm_client(
-    provider: LlmProvider,
-    model: String,
-    max_concurrent: usize,
-    api_key: String,
-) -> Result<RigLlmClient> {
-    RigLlmClient::new(provider, api_key, model, max_concurrent)
-}
-
+/// Resolve API key from CLI value or environment.
 fn resolve_api_key(cli_value: Option<String>, provider: LlmProvider) -> Result<String> {
     ensure_home_env_loaded();
     let env_var = provider.env_var();
@@ -840,7 +177,6 @@ fn pick_api_key(cli_value: Option<String>, env_value: Option<String>) -> Result<
     if let Some(key) = normalize_key(env_value) {
         return Ok(key);
     }
-
     Err(anyhow!("Missing API key"))
 }
 
@@ -914,62 +250,9 @@ fn normalize_env_value(raw: &str) -> String {
     trimmed.to_string()
 }
 
-async fn run_dry_run_probe(args: &RunArgs, llm: Arc<dyn LlmClient>) -> Result<()> {
-    tracing::info!("[dry-run] probing model '{}'...", args.llm_model);
-    println!(
-        "[dry-run] probing model '{}' with prompt...",
-        args.llm_model
-    );
-    let response = llm
-        .chat_completion(
-            &args.llm_model,
-            &args.prompt,
-            &microfactory::core::ports::LlmOptions::default(),
-        )
-        .await?;
-    println!("--- LLM Response Start ---\n{response}\n--- LLM Response End ---");
-    Ok(())
-}
-
-fn new_session_id() -> String {
-    Uuid::new_v4().to_string()
-}
-
-#[derive(Serialize)]
-struct SubprocessOutput {
-    session_id: String,
-    step_id: usize,
-    candidate_solutions: Vec<String>,
-    winning_solution: Option<String>,
-    metrics: Option<StepMetrics>,
-}
-
-fn ensure_domain_exists(config: &Arc<MicrofactoryConfig>, domain: &str) -> Result<()> {
-    if config.domain(domain).is_none() {
-        let available = if config.domains.is_empty() {
-            "<none>".to_string()
-        } else {
-            config
-                .domains
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        return Err(anyhow!(
-            "Domain '{domain}' not defined in provided configuration. Available domains: {available}"
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use async_trait::async_trait;
-    use std::{fs, path::PathBuf, sync::Arc};
-    use tempfile::tempdir;
 
     #[test]
     fn pick_api_key_prefers_cli_value() {
@@ -987,45 +270,6 @@ mod tests {
     fn pick_api_key_errors_when_missing() {
         let err = pick_api_key(None, None).unwrap_err();
         assert!(err.to_string().contains("Missing API key"));
-    }
-
-    #[tokio::test]
-    async fn dry_run_probe_bubbles_llm_errors() {
-        struct FailingClient;
-
-        #[async_trait]
-        impl LlmClient for FailingClient {
-            async fn chat_completion(
-                &self,
-                _: &str,
-                _: &str,
-                _: &microfactory::core::ports::LlmOptions,
-            ) -> microfactory::core::Result<String> {
-                Err(microfactory::core::error::Error::System("boom".into()))
-            }
-        }
-
-        let args = RunArgs {
-            prompt: "demo".into(),
-            config: PathBuf::from("config.yaml"),
-            domain: "code".into(),
-            api_key: Some("key".into()),
-            llm_model: "gpt".into(),
-            llm_provider: LlmProvider::Openai,
-            samples: 1,
-            k: 1,
-            adaptive_k: false,
-            max_concurrent_llm: 1,
-            repo_path: None,
-            dry_run: true,
-            step_by_step: false,
-            human_low_margin_threshold: 1,
-            output_dir: None,
-        };
-
-        let client: Arc<dyn LlmClient> = Arc::new(FailingClient);
-        let err = run_dry_run_probe(&args, client).await.unwrap_err();
-        assert!(err.to_string().contains("boom"));
     }
 
     #[test]
@@ -1062,30 +306,5 @@ mod tests {
             std::env::remove_var(NEW_VAR);
             std::env::remove_var(EXISTING_VAR);
         }
-    }
-
-    #[test]
-    fn load_env_prefers_microfactory_candidate_when_present() {
-        let primary = tempdir().unwrap();
-        let fallback = tempdir().unwrap();
-        let primary_file = primary.path().join(".env");
-        let fallback_file = fallback.path().join(".env");
-        fs::write(&primary_file, "PRIMARY=1").unwrap();
-        fs::write(&fallback_file, "FALLBACK=1").unwrap();
-
-        let contents = load_env_from_candidates(&[primary_file, fallback_file]).unwrap();
-        assert_eq!(contents, "PRIMARY=1");
-    }
-
-    #[test]
-    fn load_env_falls_back_when_microfactory_env_missing() {
-        let primary = tempdir().unwrap();
-        let fallback = tempdir().unwrap();
-        let missing_primary = primary.path().join(".env");
-        let fallback_file = fallback.path().join(".env");
-        fs::write(&fallback_file, "FALLBACK=1").unwrap();
-
-        let contents = load_env_from_candidates(&[missing_primary, fallback_file.clone()]).unwrap();
-        assert_eq!(contents, "FALLBACK=1");
     }
 }

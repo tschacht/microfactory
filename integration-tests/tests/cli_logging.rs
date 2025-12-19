@@ -2,7 +2,9 @@
 
 use assert_cmd::Command;
 use microfactory::{
-    adapters::persistence::{SessionEnvelope, SessionMetadata, SessionStatus, SessionStore},
+    adapters::outbound::persistence::{
+        SessionEnvelope, SessionMetadata, SessionStatus, SessionStore,
+    },
     core::domain::Context,
 };
 use predicates::prelude::*;

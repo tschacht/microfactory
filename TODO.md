@@ -93,7 +93,7 @@ Each task should include:
     - Add lightweight contract tests/fakes for the new ports to keep future refactors safe.
 
 ### TASK-015: Align CLI/Server/Main with Ring Architecture
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Priority**: Medium
 - **Dependencies**: TASK-014
 - **Context**: `src/adapters/inbound/mod.rs` still re-exports the legacy `cli` and `server` modules, and `src/main.rs` blends transport, outbound wiring, and domain orchestration. We need true inbound adapters plus a clean composition root so each ring has a single responsibility.

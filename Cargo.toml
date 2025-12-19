@@ -22,7 +22,7 @@ async-trait = "0.1"
 uuid = { version = "1.19", features = ["v4"] }
 axum = { version = "0.8", features = ["json", "macros", "tokio"] }
 tokio-stream = "0.1"
-tree-sitter = "0.25.10"
+tree-sitter = "0.26.3"
 tree-sitter-python = "0.25.0"
 tree-sitter-java = "0.23.5"
 tree-sitter-rust = "0.24.0"

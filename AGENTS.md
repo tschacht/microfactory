@@ -15,6 +15,7 @@
 - `make unit-test`, `make integration-test`, and `make test` delegate to the scripts under `scripts/` for quiet, deterministic runs.
 - `make serve` launches `microfactory serve` for inspecting sessions via HTTP.
 - `scripts/run_all_tests.sh` is the CI-friendly entry point; pair it with `make ensure-pristine` before pushing.
+- Note: under Codex/harness with network restricted, `cargo clippy` may fail because it binds a localhost TCP lock server; rerun with an approved escalated command or allow network for this repo/session.
 
 ## CLI Help & Discoverability
 - The CLI uses `clap`, so `microfactory --help` (or `microfactory -h`) prints every top-level flag plus the available subcommands.

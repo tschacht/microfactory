@@ -4,6 +4,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use walkdir::WalkDir;
 
+mod cargo_deny;
+
 #[derive(Parser)]
 #[command(author, version, about = "Workspace maintenance tasks")]
 struct Cli {
@@ -26,7 +28,7 @@ fn main() -> Result<()> {
 
 fn check_architecture() -> Result<()> {
     if has_cargo_deny()? {
-        run("cargo", &["deny", "check"])?;
+        cargo_deny::run_check()?;
     } else {
         eprintln!("cargo deny not found; skipping advisory/ban checks");
     }
@@ -83,18 +85,5 @@ fn ensure_no_pattern(dir: &str, needle: &str) -> Result<()> {
     }
 }
 
-fn run(cmd: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(cmd)
-        .args(args)
-        .status()
-        .with_context(|| format!("Failed to run {cmd} {}", args.join(" ")))?;
-    if !status.success() {
-        Err(anyhow!(
-            "{cmd} {} exited with status {}",
-            args.join(" "),
-            status
-        ))
-    } else {
-        Ok(())
-    }
-}
+// Intentionally no generic `run()` helper: callers tend to want to capture output for
+// diagnostics and/or retry logic.

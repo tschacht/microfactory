@@ -37,6 +37,7 @@ struct RigLlmClientInner {
     provider: LlmProvider,
     default_model: String,
     api_key: String,
+    http_client: reqwest::Client,
     semaphore: Arc<Semaphore>,
 }
 
@@ -57,12 +58,14 @@ impl RigLlmClient {
             return Err(anyhow!("Model identifier may not be empty"));
         }
 
+        let http_client = build_http_client()?;
         let limit = max(1, max_concurrent);
         Ok(Self {
             inner: Arc::new(RigLlmClientInner {
                 provider,
                 default_model,
                 api_key,
+                http_client,
                 semaphore: Arc::new(Semaphore::new(limit)),
             }),
         })
@@ -159,8 +162,12 @@ impl RigLlmClient {
         match self.inner.provider {
             LlmProvider::Openai => {
                 let client: openai::Client<reqwest::Client> =
-                    openai::Client::new(&self.inner.api_key)
+                    openai::Client::<reqwest::Client>::builder()
+                        .api_key(&self.inner.api_key)
+                        .http_client(self.inner.http_client.clone())
+                        .build()
                         .map_err(|err| anyhow!("Failed to create OpenAI client: {err}"))?;
+
                 let mut agent_builder = client.agent(model);
                 if let Some(temp) = temperature {
                     agent_builder = agent_builder.temperature(temp);
@@ -173,8 +180,12 @@ impl RigLlmClient {
             }
             LlmProvider::Anthropic => {
                 let client: anthropic::Client<reqwest::Client> =
-                    anthropic::Client::new(&self.inner.api_key)
+                    anthropic::Client::<reqwest::Client>::builder()
+                        .api_key(&self.inner.api_key)
+                        .http_client(self.inner.http_client.clone())
+                        .build()
                         .map_err(|err| anyhow!("Failed to create Anthropic client: {err}"))?;
+
                 let mut agent_builder = client.agent(model);
                 if let Some(temp) = temperature {
                     agent_builder = agent_builder.temperature(temp);
@@ -187,8 +198,12 @@ impl RigLlmClient {
             }
             LlmProvider::Gemini => {
                 let client: gemini::Client<reqwest::Client> =
-                    gemini::Client::new(&self.inner.api_key)
+                    gemini::Client::<reqwest::Client>::builder()
+                        .api_key(&self.inner.api_key)
+                        .http_client(self.inner.http_client.clone())
+                        .build()
                         .map_err(|err| anyhow!("Failed to create Gemini client: {err}"))?;
+
                 let mut agent_builder = client.agent(model);
                 if let Some(temp) = temperature {
                     agent_builder = agent_builder.temperature(temp);
@@ -200,8 +215,13 @@ impl RigLlmClient {
                     .map_err(|err| anyhow!("Gemini prompt error: {err}"))
             }
             LlmProvider::Grok => {
-                let client: xai::Client<reqwest::Client> = xai::Client::new(&self.inner.api_key)
-                    .map_err(|err| anyhow!("Failed to create xAI client: {err}"))?;
+                let client: xai::Client<reqwest::Client> =
+                    xai::Client::<reqwest::Client>::builder()
+                        .api_key(&self.inner.api_key)
+                        .http_client(self.inner.http_client.clone())
+                        .build()
+                        .map_err(|err| anyhow!("Failed to create xAI client: {err}"))?;
+
                 let mut agent_builder = client.agent(model);
                 if let Some(temp) = temperature {
                     agent_builder = agent_builder.temperature(temp);
@@ -214,6 +234,22 @@ impl RigLlmClient {
             }
         }
     }
+}
+
+fn build_http_client() -> Result<reqwest::Client> {
+    // `reqwest::Client::default()` can consult OS-level proxy settings.
+    // On macOS this can involve `system-configuration`, which has been observed to panic in
+    // sandboxed/restricted environments. We avoid that path by default.
+    //
+    // If one explicitly wants OS-level proxy discovery, opt in with:
+    // `MICROFACTORY_ENABLE_SYSTEM_PROXY=1`.
+    let mut builder = reqwest::Client::builder();
+    if std::env::var_os("MICROFACTORY_ENABLE_SYSTEM_PROXY").is_none() {
+        builder = builder.no_proxy();
+    }
+    builder
+        .build()
+        .map_err(|err| anyhow!("Failed to build HTTP client: {err}"))
 }
 
 #[cfg(test)]
